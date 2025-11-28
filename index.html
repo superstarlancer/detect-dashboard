@@ -441,6 +441,7 @@
           <div class='flex items-center gap-1'>
             <button class='px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px]' onclick='event.stopPropagation(); explorerUp("${nodeId}")'>Up</button>
             <button class='px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px]' onclick='event.stopPropagation(); refreshDirectory("${nodeId}")'>Refresh</button>
+            <button class='px-2 py-0.5 rounded bg-emerald-700 hover:bg-emerald-600 text-[10px]' onclick='event.stopPropagation(); openUploadDialog("${nodeId}")'>Upload</button>
             <button class='px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-[10px]' onclick='event.stopPropagation(); openExplorerModal("${nodeId}")'>Window</button>
           </div>
         </div>
@@ -543,6 +544,61 @@
       const ul = document.getElementById(`shell-log-${nodeId}`);
       if (ul) ul.scrollTop = ul.scrollHeight;
     }
+
+    // --- Upload (paste) local file into remote directory ---
+    let uploadContext = null;
+    const uploadInput = document.createElement("input");
+    uploadInput.type = "file";
+    uploadInput.id = "upload-file-input";
+    uploadInput.className = "hidden";
+    document.body.appendChild(uploadInput);
+
+    window.openUploadDialog = function (nodeId) {
+      uploadContext = { nodeId };
+      uploadInput.value = "";
+      uploadInput.click();
+    }
+
+    uploadInput.addEventListener("change", function () {
+      if (!uploadContext) {
+        uploadInput.value = "";
+        return;
+      }
+      const file = uploadInput.files && uploadInput.files[0];
+      if (!file) return;
+
+      const nodeId = uploadContext.nodeId;
+      const view = directoryViews[nodeId] || { path: "" };
+      const dirPath = view.path || "";
+
+      const reader = new FileReader();
+      reader.onload = function (e) {
+        const result = e.target && e.target.result;
+        let base64 = "";
+        if (typeof result === "string" && result.startsWith("data:")) {
+          const idx = result.indexOf("base64,");
+          base64 = idx >= 0 ? result.substring(idx + 7) : "";
+        } else if (result instanceof ArrayBuffer) {
+          const bytes = new Uint8Array(result);
+          let binary = "";
+          for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+          base64 = btoa(binary);
+        }
+        if (!base64) {
+          alert("Failed to read file for upload.");
+          return;
+        }
+        socket.emit("upload_remote_file", {
+          nodeId,
+          path: dirPath || "",
+          name: file.name,
+          contentBase64: base64
+        });
+        uploadInput.value = "";
+        uploadContext = null;
+      };
+      reader.readAsDataURL(file);
+    });
     window.handleConsoleKey = function (e, nodeId) {
       if (e.key === "Enter") {
         e.preventDefault();
@@ -851,6 +907,15 @@
       } catch (e) {
         alert("Error creating download: " + e);
       }
+    });
+
+    socket.on("upload_result", ({ client, path, name, success, error }) => {
+      if (!success) {
+        if (error) alert("Upload failed: " + error);
+        return;
+      }
+      // Refresh the current directory view for that client
+      refreshDirectory(client);
     });
   </script>
 </body>
