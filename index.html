@@ -879,6 +879,212 @@
       refreshDirectory(client);
     });
 
+    // Track active file downloads (chunked transfer)
+    const activeDownloads = {}; // fileId: { name, size, chunks: Map, receivedBytes, totalChunks, timeoutId }
+
+    // Show download progress modal
+    function showDownloadProgress(fileId, fileName, fileSize) {
+      // Remove existing progress modal if any
+      let existingModal = document.getElementById(`download-progress-${fileId}`);
+      if (existingModal) {
+        existingModal.remove();
+      }
+
+      const modal = document.createElement("div");
+      modal.id = `download-progress-${fileId}`;
+      modal.className = "fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-60";
+      modal.innerHTML = `
+        <div class="bg-slate-900 rounded-2xl shadow-2xl w-96 max-w-[90vw] p-6 border border-slate-700">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-semibold text-slate-100">Downloading File</h3>
+            <button onclick="this.closest('.fixed').remove()" class="text-slate-400 hover:text-slate-200 text-xl">&times;</button>
+          </div>
+          <div class="mb-2">
+            <div class="text-sm text-slate-300 truncate mb-2" title="${escapeHtml(fileName)}">${escapeHtml(fileName)}</div>
+            <div class="text-xs text-slate-400 mb-3" id="download-progress-text-${fileId}">0% (0 / ${formatSize(fileSize)})</div>
+            <div class="w-full bg-slate-800 rounded-full h-2.5 mb-1">
+              <div id="download-progress-bar-${fileId}" class="bg-sky-500 h-2.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+            </div>
+          </div>
+          <div class="text-xs text-slate-500">Please wait while the file is being downloaded...</div>
+        </div>
+      `;
+      document.body.appendChild(modal);
+    }
+
+    function updateDownloadProgress(fileId, receivedBytes, totalSize) {
+      const textEl = document.getElementById(`download-progress-text-${fileId}`);
+      const barEl = document.getElementById(`download-progress-bar-${fileId}`);
+      if (textEl && barEl) {
+        const percent = totalSize > 0 ? Math.min(100, Math.round((receivedBytes / totalSize) * 100)) : 0;
+        textEl.textContent = `${percent}% (${formatSize(receivedBytes)} / ${formatSize(totalSize)})`;
+        barEl.style.width = `${percent}%`;
+      }
+    }
+
+    function removeDownloadProgress(fileId) {
+      const modal = document.getElementById(`download-progress-${fileId}`);
+      if (modal) {
+        modal.remove();
+      }
+    }
+
+    // Handle chunked file transfer start
+    socket.on("file_start", ({ client, fileId, path, name, size, error }) => {
+      if (error) {
+        alert("Download failed: " + error);
+        return;
+      }
+      // Clear any existing timeout
+      if (activeDownloads[fileId] && activeDownloads[fileId].timeoutId) {
+        clearTimeout(activeDownloads[fileId].timeoutId);
+      }
+      activeDownloads[fileId] = {
+        name: name || "download.bin",
+        size: size || 0,
+        chunks: new Map(),
+        receivedBytes: 0,
+        totalChunks: 0,
+        timeoutId: null,
+        startTime: Date.now()
+      };
+      showDownloadProgress(fileId, name || "download.bin", size || 0);
+      
+      // Set a timeout in case download stalls (5 minutes)
+      activeDownloads[fileId].timeoutId = setTimeout(() => {
+        if (activeDownloads[fileId]) {
+          alert(`Download timeout for ${name || "file"}. Some chunks may be missing.`);
+          removeDownloadProgress(fileId);
+          delete activeDownloads[fileId];
+        }
+      }, 5 * 60 * 1000);
+    });
+
+    // Handle file chunks
+    socket.on("file_chunk", ({ client, fileId, chunkIndex, chunkBase64, isLast }) => {
+      if (!activeDownloads[fileId]) {
+        console.warn("Received chunk for unknown file:", fileId);
+        return;
+      }
+      
+      const download = activeDownloads[fileId];
+      download.chunks.set(chunkIndex, chunkBase64);
+      
+      // Calculate actual bytes received (base64 is ~33% larger, so divide by 1.33)
+      // More accurate: base64 length * 3 / 4 gives approximate byte count
+      const chunkBytes = Math.floor(chunkBase64.length * 3 / 4);
+      download.receivedBytes += chunkBytes;
+      
+      // Update progress
+      updateDownloadProgress(fileId, download.receivedBytes, download.size);
+      
+      if (isLast) {
+        download.totalChunks = chunkIndex + 1;
+        // Check if we have all chunks before processing
+        let allChunksReceived = true;
+        for (let i = 0; i < download.totalChunks; i++) {
+          if (!download.chunks.has(i)) {
+            allChunksReceived = false;
+            break;
+          }
+        }
+        
+        if (allChunksReceived) {
+          // All chunks received, process immediately
+          if (download.timeoutId) {
+            clearTimeout(download.timeoutId);
+          }
+          processChunkedFile(fileId);
+        } else {
+          // Wait a bit for any missing chunks, then process anyway
+          setTimeout(() => {
+            if (activeDownloads[fileId]) {
+              if (activeDownloads[fileId].timeoutId) {
+                clearTimeout(activeDownloads[fileId].timeoutId);
+              }
+              processChunkedFile(fileId);
+            }
+          }, 2000);
+        }
+      }
+    });
+
+    // Handle file complete
+    socket.on("file_complete", ({ client, fileId, path, name, size, error }) => {
+      if (error) {
+        alert("Download failed: " + error);
+        removeDownloadProgress(fileId);
+        delete activeDownloads[fileId];
+        return;
+      }
+      // File processing should already be triggered by the last chunk
+      // This is just a confirmation
+    });
+
+    // Process and download the reassembled file
+    function processChunkedFile(fileId) {
+      const download = activeDownloads[fileId];
+      if (!download) return;
+
+      try {
+        // Reassemble chunks in order
+        const chunkArray = [];
+        const missingChunks = [];
+        for (let i = 0; i < download.totalChunks; i++) {
+          const chunk = download.chunks.get(i);
+          if (!chunk) {
+            missingChunks.push(i);
+          } else {
+            chunkArray.push(chunk);
+          }
+        }
+
+        if (missingChunks.length > 0) {
+          alert(`Missing ${missingChunks.length} chunk(s) (${missingChunks.slice(0, 5).join(", ")}${missingChunks.length > 5 ? "..." : ""}) for file download. Download may be incomplete.`);
+          removeDownloadProgress(fileId);
+          delete activeDownloads[fileId];
+          return;
+        }
+
+        // Combine all chunks
+        const fullBase64 = chunkArray.join("");
+        
+        // Convert base64 to blob
+        const byteCharacters = atob(fullBase64);
+        const byteNumbers = new Array(byteCharacters.length);
+        for (let i = 0; i < byteCharacters.length; i++) {
+          byteNumbers[i] = byteCharacters.charCodeAt(i);
+        }
+        const byteArray = new Uint8Array(byteNumbers);
+        const blob = new Blob([byteArray], { type: "application/octet-stream" });
+        
+        // Update progress to 100%
+        updateDownloadProgress(fileId, download.size, download.size);
+        
+        // Small delay to show 100% before download
+        setTimeout(() => {
+          // Trigger download
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = download.name;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+
+          // Clean up
+          removeDownloadProgress(fileId);
+          delete activeDownloads[fileId];
+        }, 300);
+      } catch (e) {
+        alert("Error processing downloaded file: " + e);
+        removeDownloadProgress(fileId);
+        delete activeDownloads[fileId];
+      }
+    }
+
+    // Legacy file_data handler (for backward compatibility with small files)
     socket.on("file_data", ({ client, path, name, size, contentBase64, error }) => {
       if (error) {
         alert("Download failed: " + error);
