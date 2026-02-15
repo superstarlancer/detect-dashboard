@@ -296,7 +296,7 @@
             <div class="text-slate-300 text-sm">Loading remote desktop...</div>
           </div>
         </div>
-        <div id="remoteAccessScreens" class="flex flex-wrap gap-4 p-4 justify-center items-center min-h-full">
+        <div id="remoteAccessScreens" class="flex flex-wrap gap-4 p-4 justify-center items-center min-h-full relative">
           <!-- Screenshots will be inserted here -->
         </div>
       </div>
@@ -1323,7 +1323,7 @@
       console.log("Requesting remote access for:", nodeId);
       socket.emit("request_remote_access", { nodeId });
       
-      // Start periodic updates (every 300ms for better real-time feel)
+      // Start periodic updates (every 500ms for low network speeds)
       if (remoteUpdateInterval) clearInterval(remoteUpdateInterval);
       remoteUpdateInterval = setInterval(() => {
         if (activeRemoteNodeId && remoteAccessActive) {
@@ -1333,7 +1333,7 @@
             screenIdx: currentScreen
           });
         }
-      }, 300);
+      }, 500); // Increased from 300ms to 500ms for low network speeds
     };
 
     // Close Remote Access Modal
@@ -1354,7 +1354,7 @@
 
     // Switch between desktops
     window.switchRemoteDesktop = function () {
-      if (!activeRemoteNodeId) return;
+      if (!activeRemoteNodeId || !remoteAccessActive) return;
       const selectEl = document.getElementById("remoteDesktopSelect");
       if (!selectEl) return;
       
@@ -1362,7 +1362,14 @@
       const screens = remoteScreens[activeRemoteNodeId];
       if (screens) {
         screens.currentScreen = screenIdx;
+        console.log(`Switched to screen ${screenIdx} for node ${activeRemoteNodeId}`);
         renderRemoteScreens();
+        
+        // Request screenshot update for the newly selected screen
+        socket.emit("request_remote_screenshot_update", { 
+          nodeId: activeRemoteNodeId,
+          screenIdx: screenIdx
+        });
       }
     };
 
@@ -1395,24 +1402,100 @@
       // Render current screen
       const currentScreen = screens.screens[screens.currentScreen];
       if (currentScreen && currentScreen.url) {
-        // Remove old image if exists
-        screensEl.innerHTML = "";
+        // Try to reuse existing image to preserve event handlers
+        let img = screensEl.querySelector("img");
         
-        const img = document.createElement("img");
+        if (!img) {
+          // Create new image if it doesn't exist
+          img = document.createElement("img");
+          img.className = "max-w-full max-h-full object-contain cursor-crosshair select-none";
+          img.style.userSelect = "none";
+          img.style.pointerEvents = "auto";
+          img.draggable = false;
+          img.tabIndex = 0; // Make focusable for keyboard events
+          
+          // Prevent context menu
+          img.addEventListener("contextmenu", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            return false;
+          });
+          
+          // Mouse event handlers - attach directly to image
+          const mouseMoveHandler = (e) => {
+            e.stopPropagation();
+            handleRemoteMouseMove(e);
+          };
+          
+          const mouseDownHandler = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            handleRemoteMouseDown(e);
+          };
+          
+          const mouseUpHandler = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            handleRemoteMouseUp(e);
+          };
+          
+          const wheelHandler = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            handleRemoteWheel(e);
+          };
+          
+          const clickHandler = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            img.focus(); // Focus image for keyboard events
+          };
+          
+          img.addEventListener("mousemove", mouseMoveHandler, false);
+          img.addEventListener("mousedown", mouseDownHandler, false);
+          img.addEventListener("mouseup", mouseUpHandler, false);
+          img.addEventListener("wheel", wheelHandler, false);
+          img.addEventListener("click", clickHandler, false);
+          
+          // Store handlers on image for cleanup if needed
+          img._remoteHandlers = {
+            mousemove: mouseMoveHandler,
+            mousedown: mouseDownHandler,
+            mouseup: mouseUpHandler,
+            wheel: wheelHandler,
+            click: clickHandler
+          };
+          
+          screensEl.innerHTML = "";
+          screensEl.appendChild(img);
+        }
+        
+        // Update image source and dimensions
         img.src = currentScreen.url;
-        img.className = "max-w-full max-h-full object-contain cursor-crosshair select-none";
-        img.style.userSelect = "none";
-        img.style.pointerEvents = "auto";
-        img.draggable = false;
-        img.tabIndex = 0; // Make focusable for keyboard events
-        
-        // Store actual screen dimensions for coordinate calculation
         const actualWidth = currentScreen.actualWidth || 1920;
         const actualHeight = currentScreen.actualHeight || 1080;
         img.dataset.actualWidth = actualWidth;
         img.dataset.actualHeight = actualHeight;
+        img.dataset.cursorX = currentScreen.cursorX !== undefined ? currentScreen.cursorX : -1;
+        img.dataset.cursorY = currentScreen.cursorY !== undefined ? currentScreen.cursorY : -1;
         
-        // Ensure image loads before calculating dimensions
+        // Remove old cursor overlay if exists
+        const oldCursor = screensEl.querySelector(".remote-cursor-overlay");
+        if (oldCursor) oldCursor.remove();
+        
+        // Create or update cursor overlay
+        let cursorOverlay = screensEl.querySelector(".remote-cursor-overlay");
+        if (!cursorOverlay) {
+          cursorOverlay = document.createElement("div");
+          cursorOverlay.className = "remote-cursor-overlay";
+          cursorOverlay.style.position = "absolute";
+          cursorOverlay.style.pointerEvents = "none";
+          cursorOverlay.style.zIndex = "1000";
+          cursorOverlay.style.display = "none";
+          screensEl.appendChild(cursorOverlay);
+        }
+        
+        // Ensure image loads before calculating dimensions and cursor position
         img.onload = function() {
           // Update dimensions if not set correctly
           if (!img.dataset.actualWidth || img.dataset.actualWidth === "0" || img.dataset.actualWidth === "undefined") {
@@ -1422,48 +1505,63 @@
             img.dataset.actualHeight = actualHeight || img.naturalHeight || 1080;
           }
           
-          // Focus the image to enable keyboard events
-          setTimeout(() => {
-            img.focus();
-          }, 50);
+          // Update cursor position
+          updateCursorOverlay(img, cursorOverlay);
         };
         
-        // Prevent context menu
-        img.addEventListener("contextmenu", (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          return false;
-        });
-        
-        // Mouse event handlers - attach directly to image
-        img.addEventListener("mousemove", handleRemoteMouseMove, { passive: true });
-        img.addEventListener("mousedown", handleRemoteMouseDown, { capture: true });
-        img.addEventListener("mouseup", handleRemoteMouseUp, { capture: true });
-        img.addEventListener("click", (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          img.focus(); // Focus image for keyboard events
-        }, { capture: true });
-        
-        // Also handle mouse events on the container for better coverage
-        const containerHandler = (e) => {
-          if (e.target === img || img.contains(e.target)) {
-            // Let the image handler take care of it
-            return;
-          }
-          // If clicking on container but not image, focus container
-          if (container) container.focus();
+        // Also update cursor when image dimensions change
+        const updateCursor = () => {
+          updateCursorOverlay(img, cursorOverlay);
         };
-        
-        screensEl.addEventListener("mousedown", containerHandler, { capture: true });
-        screensEl.addEventListener("click", containerHandler, { capture: true });
-        
-        screensEl.appendChild(img);
+        img.addEventListener("load", updateCursor);
         
         // Focus container initially, then image will take focus on load
         if (container) {
           container.focus();
         }
+        
+        // Focus image after a short delay
+        setTimeout(() => {
+          if (img) img.focus();
+          updateCursorOverlay(img, cursorOverlay);
+        }, 100);
+      }
+    }
+    
+    // Update cursor overlay position
+    function updateCursorOverlay(img, cursorOverlay) {
+      if (!img || !cursorOverlay) return;
+      
+      const rect = img.getBoundingClientRect();
+      const screensEl = document.getElementById("remoteAccessScreens");
+      const containerRect = screensEl ? screensEl.getBoundingClientRect() : null;
+      
+      const actualWidth = parseInt(img.dataset.actualWidth) || 1920;
+      const actualHeight = parseInt(img.dataset.actualHeight) || 1080;
+      const cursorX = parseInt(img.dataset.cursorX) || -1;
+      const cursorY = parseInt(img.dataset.cursorY) || -1;
+      
+      if (cursorX >= 0 && cursorY >= 0 && rect.width > 0 && rect.height > 0 && containerRect) {
+        // Calculate cursor position on scaled image
+        const scaleX = rect.width / actualWidth;
+        const scaleY = rect.height / actualHeight;
+        const x = (rect.left - containerRect.left) + (cursorX * scaleX);
+        const y = (rect.top - containerRect.top) + (cursorY * scaleY);
+        
+        // Show and position cursor overlay (relative to container)
+        cursorOverlay.style.display = "block";
+        cursorOverlay.style.left = `${x}px`;
+        cursorOverlay.style.top = `${y}px`;
+        cursorOverlay.style.width = "20px";
+        cursorOverlay.style.height = "20px";
+        cursorOverlay.style.marginLeft = "-10px";
+        cursorOverlay.style.marginTop = "-10px";
+        cursorOverlay.style.border = "2px solid white";
+        cursorOverlay.style.borderRadius = "50%";
+        cursorOverlay.style.boxShadow = "0 0 0 1px black, 0 0 4px rgba(0,0,0,0.5)";
+        cursorOverlay.style.background = "rgba(255, 255, 255, 0.3)";
+      } else {
+        cursorOverlay.style.display = "none";
       }
     }
 
@@ -1494,12 +1592,16 @@
       const x = Math.max(0, Math.min(actualWidth - 1, Math.round((e.clientX - rect.left) * scaleX)));
       const y = Math.max(0, Math.min(actualHeight - 1, Math.round((e.clientY - rect.top) * scaleY)));
       
+      // Ensure coordinates are within bounds
+      const clampedX = Math.max(0, Math.min(actualWidth - 1, x));
+      const clampedY = Math.max(0, Math.min(actualHeight - 1, y));
+      
       const eventData = {
         nodeId: activeRemoteNodeId,
         screenIdx: remoteScreens[activeRemoteNodeId]?.currentScreen || 0,
         type: "move",
-        x,
-        y
+        x: clampedX,
+        y: clampedY
       };
       
       socket.emit("remote_mouse_event", eventData);
@@ -1508,8 +1610,6 @@
     // Handle mouse down
     function handleRemoteMouseDown(e) {
       if (!activeRemoteNodeId || !remoteAccessActive) return;
-      e.preventDefault();
-      e.stopPropagation();
       
       // Find the image element
       let img = e.currentTarget || e.target;
@@ -1533,23 +1633,27 @@
       const y = Math.max(0, Math.min(actualHeight - 1, Math.round((e.clientY - rect.top) * scaleY)));
       const button = e.button === 0 ? "left" : e.button === 2 ? "right" : "middle";
       
+      // Ensure coordinates are within bounds
+      const clampedX = Math.max(0, Math.min(actualWidth - 1, x));
+      const clampedY = Math.max(0, Math.min(actualHeight - 1, y));
+      
+      const currentScreenIdx = remoteScreens[activeRemoteNodeId]?.currentScreen || 0;
       const eventData = {
         nodeId: activeRemoteNodeId,
-        screenIdx: remoteScreens[activeRemoteNodeId]?.currentScreen || 0,
+        screenIdx: currentScreenIdx,
         type: "down",
         button,
-        x,
-        y
+        x: clampedX,
+        y: clampedY
       };
       
+      console.log(`Mouse down on screen ${currentScreenIdx}:`, eventData);
       socket.emit("remote_mouse_event", eventData);
     }
 
     // Handle mouse up
     function handleRemoteMouseUp(e) {
       if (!activeRemoteNodeId || !remoteAccessActive) return;
-      e.preventDefault();
-      e.stopPropagation();
       
       // Find the image element
       let img = e.currentTarget || e.target;
@@ -1570,21 +1674,75 @@
       const y = Math.max(0, Math.min(actualHeight - 1, Math.round((e.clientY - rect.top) * scaleY)));
       const button = e.button === 0 ? "left" : e.button === 2 ? "right" : "middle";
       
+      // Ensure coordinates are within bounds
+      const clampedX = Math.max(0, Math.min(actualWidth - 1, x));
+      const clampedY = Math.max(0, Math.min(actualHeight - 1, y));
+      
+      const currentScreenIdx = remoteScreens[activeRemoteNodeId]?.currentScreen || 0;
       const eventData = {
         nodeId: activeRemoteNodeId,
-        screenIdx: remoteScreens[activeRemoteNodeId]?.currentScreen || 0,
+        screenIdx: currentScreenIdx,
         type: "up",
         button,
-        x,
-        y
+        x: clampedX,
+        y: clampedY
       };
       
+      console.log(`Mouse up on screen ${currentScreenIdx}:`, eventData);
       socket.emit("remote_mouse_event", eventData);
     }
 
-    // Handle click
-    function handleRemoteClick(e) {
-      // Click is handled by mousedown/mouseup, but we can add double-click here if needed
+    // Handle mouse wheel/scroll
+    function handleRemoteWheel(e) {
+      if (!activeRemoteNodeId || !remoteAccessActive) return;
+      
+      // Find the image element
+      let img = e.currentTarget || e.target;
+      if (!img || img.tagName !== "IMG") {
+        const screensEl = document.getElementById("remoteAccessScreens");
+        img = screensEl ? screensEl.querySelector("img") : null;
+        if (!img) return;
+      }
+      
+      const rect = img.getBoundingClientRect();
+      const actualWidth = parseInt(img.dataset.actualWidth) || 1920;
+      const actualHeight = parseInt(img.dataset.actualHeight) || 1080;
+      
+      // Calculate coordinates
+      const scaleX = actualWidth / rect.width;
+      const scaleY = actualHeight / rect.height;
+      const x = Math.max(0, Math.min(actualWidth - 1, Math.round((e.clientX - rect.left) * scaleX)));
+      const y = Math.max(0, Math.min(actualHeight - 1, Math.round((e.clientY - rect.top) * scaleY)));
+      
+      // Get scroll delta
+      // deltaY: positive = scroll down, negative = scroll up
+      // Windows expects positive = scroll up, negative = scroll down
+      // So we need to invert the sign
+      const deltaY = e.deltaY || 0;
+      const deltaX = e.deltaX || 0;
+      
+      // Normalize delta (typically 100 per "click" of scroll)
+      // Invert sign: browser positive deltaY = scroll down, but Windows positive = scroll up
+      const scrollDelta = -Math.round(deltaY / 100);
+      const scrollDeltaX = -Math.round(deltaX / 100);
+      
+      // Ensure coordinates are within bounds
+      const clampedX = Math.max(0, Math.min(actualWidth - 1, x));
+      const clampedY = Math.max(0, Math.min(actualHeight - 1, y));
+      
+      const currentScreenIdx = remoteScreens[activeRemoteNodeId]?.currentScreen || 0;
+      const eventData = {
+        nodeId: activeRemoteNodeId,
+        screenIdx: currentScreenIdx,
+        type: "wheel",
+        x: clampedX,
+        y: clampedY,
+        delta: scrollDelta,
+        deltaX: scrollDeltaX
+      };
+      
+      console.log(`Mouse wheel on screen ${currentScreenIdx}:`, eventData);
+      socket.emit("remote_mouse_event", eventData);
     }
 
     // Handle keyboard events - attach to window for better capture
@@ -1704,12 +1862,14 @@
         remoteScreens[client] = { screens: [], currentScreen: 0 };
       }
       
-      // Convert base64 to data URLs and store actual dimensions
+      // Convert base64 to data URLs and store actual dimensions and cursor position
       remoteScreens[client].screens = screens.map(s => ({
         screenIdx: s.screenIdx || 0,
         url: s.base64 ? `data:image/jpeg;base64,${s.base64}` : "",
         actualWidth: s.actualWidth || 0,
-        actualHeight: s.actualHeight || 0
+        actualHeight: s.actualHeight || 0,
+        cursorX: s.cursorX !== undefined ? s.cursorX : -1,
+        cursorY: s.cursorY !== undefined ? s.cursorY : -1
       }));
       
       if (activeRemoteNodeId === client) {
@@ -1717,16 +1877,30 @@
       }
     });
 
-    socket.on("remote_screenshot_update", ({ client, screenIdx, base64, actualWidth, actualHeight }) => {
+    socket.on("remote_screenshot_update", ({ client, screenIdx, base64, actualWidth, actualHeight, cursorX, cursorY }) => {
       if (!client || base64 === undefined) return;
       
       if (remoteScreens[client] && remoteScreens[client].screens[screenIdx]) {
         remoteScreens[client].screens[screenIdx].url = `data:image/jpeg;base64,${base64}`;
         if (actualWidth) remoteScreens[client].screens[screenIdx].actualWidth = actualWidth;
         if (actualHeight) remoteScreens[client].screens[screenIdx].actualHeight = actualHeight;
+        if (cursorX !== undefined) remoteScreens[client].screens[screenIdx].cursorX = cursorX;
+        if (cursorY !== undefined) remoteScreens[client].screens[screenIdx].cursorY = cursorY;
         
         if (activeRemoteNodeId === client) {
           renderRemoteScreens();
+          
+          // Update cursor overlay after render
+          setTimeout(() => {
+            const screensEl = document.getElementById("remoteAccessScreens");
+            const img = screensEl ? screensEl.querySelector("img") : null;
+            const cursorOverlay = screensEl ? screensEl.querySelector(".remote-cursor-overlay") : null;
+            if (img && cursorOverlay) {
+              img.dataset.cursorX = remoteScreens[client].screens[screenIdx].cursorX !== undefined ? remoteScreens[client].screens[screenIdx].cursorX : -1;
+              img.dataset.cursorY = remoteScreens[client].screens[screenIdx].cursorY !== undefined ? remoteScreens[client].screens[screenIdx].cursorY : -1;
+              updateCursorOverlay(img, cursorOverlay);
+            }
+          }, 50);
         }
       }
     });
