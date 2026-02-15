@@ -1278,9 +1278,14 @@
 
     // Open Remote Access Modal
     window.openRemoteAccess = function (nodeId) {
+      // Set active state first
       activeRemoteNodeId = nodeId;
       remoteAccessActive = true;
-      remoteScreens[nodeId] = { screens: [], currentScreen: 0 };
+      
+      // Initialize screens data structure
+      if (!remoteScreens[nodeId]) {
+        remoteScreens[nodeId] = { screens: [], currentScreen: 0 };
+      }
       
       const modal = document.getElementById("remoteAccessModal");
       const titleEl = document.getElementById("remoteAccessTitle");
@@ -1288,6 +1293,7 @@
       const loadingEl = document.getElementById("remoteAccessLoading");
       const screensEl = document.getElementById("remoteAccessScreens");
       const selectEl = document.getElementById("remoteDesktopSelect");
+      const container = document.getElementById("remoteAccessContainer");
       
       if (!modal || !titleEl || !subEl) return;
       
@@ -1302,34 +1308,38 @@
       // Clear desktop select
       if (selectEl) selectEl.innerHTML = "";
       
+      // Show modal
       modal.classList.remove("hidden");
       
-      // Focus the modal to capture keyboard events
+      // Focus the container to capture keyboard events
       setTimeout(() => {
-        modal.focus();
+        if (container) {
+          container.focus();
+          container.setAttribute("tabindex", "0");
+        }
       }, 100);
       
-      // Request remote access
+      // Request initial remote access screenshot
+      console.log("Requesting remote access for:", nodeId);
       socket.emit("request_remote_access", { nodeId });
       
-      // Start periodic updates (every 500ms for real-time feel)
+      // Start periodic updates (every 300ms for better real-time feel)
       if (remoteUpdateInterval) clearInterval(remoteUpdateInterval);
       remoteUpdateInterval = setInterval(() => {
         if (activeRemoteNodeId && remoteAccessActive) {
+          const currentScreen = remoteScreens[activeRemoteNodeId]?.currentScreen || 0;
           socket.emit("request_remote_screenshot_update", { 
             nodeId: activeRemoteNodeId,
-            screenIdx: remoteScreens[activeRemoteNodeId]?.currentScreen || 0
+            screenIdx: currentScreen
           });
         }
-      }, 500);
+      }, 300);
     };
 
     // Close Remote Access Modal
     window.closeRemoteAccess = function () {
       const modal = document.getElementById("remoteAccessModal");
       if (modal) modal.classList.add("hidden");
-      activeRemoteNodeId = null;
-      remoteAccessActive = false;
       
       // Stop periodic updates
       if (remoteUpdateInterval) {
@@ -1337,8 +1347,9 @@
         remoteUpdateInterval = null;
       }
       
-      // Remove keyboard handlers (they check activeRemoteNodeId so they won't fire anyway, but clean up)
-      // Actually, we keep them attached but they check the flag, so it's fine
+      // Clear state
+      activeRemoteNodeId = null;
+      remoteAccessActive = false;
     };
 
     // Switch between desktops
@@ -1357,10 +1368,13 @@
 
     // Render remote screens
     function renderRemoteScreens() {
-      if (!activeRemoteNodeId) return;
+      if (!activeRemoteNodeId || !remoteAccessActive) return;
+      
       const screensEl = document.getElementById("remoteAccessScreens");
       const loadingEl = document.getElementById("remoteAccessLoading");
       const selectEl = document.getElementById("remoteDesktopSelect");
+      const container = document.getElementById("remoteAccessContainer");
+      
       if (!screensEl) return;
       
       const screens = remoteScreens[activeRemoteNodeId];
@@ -1380,57 +1394,76 @@
       
       // Render current screen
       const currentScreen = screens.screens[screens.currentScreen];
-      if (currentScreen) {
+      if (currentScreen && currentScreen.url) {
+        // Remove old image if exists
+        screensEl.innerHTML = "";
+        
         const img = document.createElement("img");
         img.src = currentScreen.url;
-        img.className = "max-w-full max-h-full object-contain cursor-crosshair";
+        img.className = "max-w-full max-h-full object-contain cursor-crosshair select-none";
         img.style.userSelect = "none";
+        img.style.pointerEvents = "auto";
         img.draggable = false;
         img.tabIndex = 0; // Make focusable for keyboard events
         
         // Store actual screen dimensions for coordinate calculation
-        img.dataset.actualWidth = currentScreen.actualWidth || img.naturalWidth;
-        img.dataset.actualHeight = currentScreen.actualHeight || img.naturalHeight;
+        const actualWidth = currentScreen.actualWidth || 1920;
+        const actualHeight = currentScreen.actualHeight || 1080;
+        img.dataset.actualWidth = actualWidth;
+        img.dataset.actualHeight = actualHeight;
         
         // Ensure image loads before calculating dimensions
         img.onload = function() {
-          if (!img.dataset.actualWidth || img.dataset.actualWidth === "0") {
-            img.dataset.actualWidth = img.naturalWidth;
+          // Update dimensions if not set correctly
+          if (!img.dataset.actualWidth || img.dataset.actualWidth === "0" || img.dataset.actualWidth === "undefined") {
+            img.dataset.actualWidth = actualWidth || img.naturalWidth || 1920;
           }
-          if (!img.dataset.actualHeight || img.dataset.actualHeight === "0") {
-            img.dataset.actualHeight = img.naturalHeight;
+          if (!img.dataset.actualHeight || img.dataset.actualHeight === "0" || img.dataset.actualHeight === "undefined") {
+            img.dataset.actualHeight = actualHeight || img.naturalHeight || 1080;
           }
+          
+          // Focus the image to enable keyboard events
+          setTimeout(() => {
+            img.focus();
+          }, 50);
         };
         
-        // Add event handlers
-        img.addEventListener("mousemove", handleRemoteMouseMove, { passive: true });
-        img.addEventListener("mousedown", handleRemoteMouseDown);
-        img.addEventListener("mouseup", handleRemoteMouseUp);
+        // Prevent context menu
         img.addEventListener("contextmenu", (e) => {
           e.preventDefault();
           e.stopPropagation();
+          return false;
         });
+        
+        // Mouse event handlers - attach directly to image
+        img.addEventListener("mousemove", handleRemoteMouseMove, { passive: true });
+        img.addEventListener("mousedown", handleRemoteMouseDown, { capture: true });
+        img.addEventListener("mouseup", handleRemoteMouseUp, { capture: true });
         img.addEventListener("click", (e) => {
           e.preventDefault();
           e.stopPropagation();
           img.focus(); // Focus image for keyboard events
-          handleRemoteClick(e);
-        });
+        }, { capture: true });
         
         // Also handle mouse events on the container for better coverage
-        screensEl.addEventListener("mousemove", (e) => {
+        const containerHandler = (e) => {
           if (e.target === img || img.contains(e.target)) {
-            handleRemoteMouseMove(e);
+            // Let the image handler take care of it
+            return;
           }
-        }, { passive: true });
+          // If clicking on container but not image, focus container
+          if (container) container.focus();
+        };
         
-        screensEl.innerHTML = "";
+        screensEl.addEventListener("mousedown", containerHandler, { capture: true });
+        screensEl.addEventListener("click", containerHandler, { capture: true });
+        
         screensEl.appendChild(img);
         
-        // Focus the image to enable keyboard events
-        setTimeout(() => {
-          img.focus();
-        }, 100);
+        // Focus container initially, then image will take focus on load
+        if (container) {
+          container.focus();
+        }
       }
     }
 
@@ -1442,8 +1475,8 @@
       if (now - lastMouseMoveTime < MOUSE_MOVE_THROTTLE) return;
       lastMouseMoveTime = now;
       
-      // Find the image element (it might be e.currentTarget or e.target)
-      let img = e.currentTarget;
+      // Find the image element
+      let img = e.currentTarget || e.target;
       if (!img || img.tagName !== "IMG") {
         const screensEl = document.getElementById("remoteAccessScreens");
         img = screensEl ? screensEl.querySelector("img") : null;
@@ -1451,12 +1484,15 @@
       }
       
       const rect = img.getBoundingClientRect();
-      const actualWidth = parseInt(img.dataset.actualWidth) || img.naturalWidth || 1920;
-      const actualHeight = parseInt(img.dataset.actualHeight) || img.naturalHeight || 1080;
+      const actualWidth = parseInt(img.dataset.actualWidth) || 1920;
+      const actualHeight = parseInt(img.dataset.actualHeight) || 1080;
       
-      // Calculate coordinates based on actual screen dimensions, not scaled image
-      const x = Math.max(0, Math.round((e.clientX - rect.left) * (actualWidth / rect.width)));
-      const y = Math.max(0, Math.round((e.clientY - rect.top) * (actualHeight / rect.height)));
+      // Calculate coordinates based on actual screen dimensions
+      // Account for image scaling and positioning
+      const scaleX = actualWidth / rect.width;
+      const scaleY = actualHeight / rect.height;
+      const x = Math.max(0, Math.min(actualWidth - 1, Math.round((e.clientX - rect.left) * scaleX)));
+      const y = Math.max(0, Math.min(actualHeight - 1, Math.round((e.clientY - rect.top) * scaleY)));
       
       const eventData = {
         nodeId: activeRemoteNodeId,
@@ -1466,7 +1502,6 @@
         y
       };
       
-      console.log("Sending mouse move:", eventData);
       socket.emit("remote_mouse_event", eventData);
     }
 
@@ -1477,19 +1512,25 @@
       e.stopPropagation();
       
       // Find the image element
-      let img = e.currentTarget;
+      let img = e.currentTarget || e.target;
       if (!img || img.tagName !== "IMG") {
         const screensEl = document.getElementById("remoteAccessScreens");
         img = screensEl ? screensEl.querySelector("img") : null;
         if (!img) return;
       }
       
-      const rect = img.getBoundingClientRect();
-      const actualWidth = parseInt(img.dataset.actualWidth) || img.naturalWidth || 1920;
-      const actualHeight = parseInt(img.dataset.actualHeight) || img.naturalHeight || 1080;
+      // Focus image for keyboard events
+      img.focus();
       
-      const x = Math.max(0, Math.round((e.clientX - rect.left) * (actualWidth / rect.width)));
-      const y = Math.max(0, Math.round((e.clientY - rect.top) * (actualHeight / rect.height)));
+      const rect = img.getBoundingClientRect();
+      const actualWidth = parseInt(img.dataset.actualWidth) || 1920;
+      const actualHeight = parseInt(img.dataset.actualHeight) || 1080;
+      
+      // Calculate coordinates
+      const scaleX = actualWidth / rect.width;
+      const scaleY = actualHeight / rect.height;
+      const x = Math.max(0, Math.min(actualWidth - 1, Math.round((e.clientX - rect.left) * scaleX)));
+      const y = Math.max(0, Math.min(actualHeight - 1, Math.round((e.clientY - rect.top) * scaleY)));
       const button = e.button === 0 ? "left" : e.button === 2 ? "right" : "middle";
       
       const eventData = {
@@ -1501,7 +1542,6 @@
         y
       };
       
-      console.log("Sending mouse down:", eventData);
       socket.emit("remote_mouse_event", eventData);
     }
 
@@ -1512,7 +1552,7 @@
       e.stopPropagation();
       
       // Find the image element
-      let img = e.currentTarget;
+      let img = e.currentTarget || e.target;
       if (!img || img.tagName !== "IMG") {
         const screensEl = document.getElementById("remoteAccessScreens");
         img = screensEl ? screensEl.querySelector("img") : null;
@@ -1520,11 +1560,14 @@
       }
       
       const rect = img.getBoundingClientRect();
-      const actualWidth = parseInt(img.dataset.actualWidth) || img.naturalWidth || 1920;
-      const actualHeight = parseInt(img.dataset.actualHeight) || img.naturalHeight || 1080;
+      const actualWidth = parseInt(img.dataset.actualWidth) || 1920;
+      const actualHeight = parseInt(img.dataset.actualHeight) || 1080;
       
-      const x = Math.max(0, Math.round((e.clientX - rect.left) * (actualWidth / rect.width)));
-      const y = Math.max(0, Math.round((e.clientY - rect.top) * (actualHeight / rect.height)));
+      // Calculate coordinates
+      const scaleX = actualWidth / rect.width;
+      const scaleY = actualHeight / rect.height;
+      const x = Math.max(0, Math.min(actualWidth - 1, Math.round((e.clientX - rect.left) * scaleX)));
+      const y = Math.max(0, Math.min(actualHeight - 1, Math.round((e.clientY - rect.top) * scaleY)));
       const button = e.button === 0 ? "left" : e.button === 2 ? "right" : "middle";
       
       const eventData = {
@@ -1536,7 +1579,6 @@
         y
       };
       
-      console.log("Sending mouse up:", eventData);
       socket.emit("remote_mouse_event", eventData);
     }
 
@@ -1548,18 +1590,31 @@
     // Handle keyboard events - attach to window for better capture
     function handleRemoteKeyDown(e) {
       if (!activeRemoteNodeId || !remoteAccessActive) return;
+      
       const modal = document.getElementById("remoteAccessModal");
       if (!modal || modal.classList.contains("hidden")) return;
       
-      // Don't capture if user is typing in an input/select
+      // Don't capture if user is typing in an input/select/button
       const target = e.target;
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT")) {
+      if (target && (
+        target.tagName === "INPUT" || 
+        target.tagName === "TEXTAREA" || 
+        target.tagName === "SELECT" ||
+        target.tagName === "BUTTON" ||
+        target.isContentEditable
+      )) {
         return;
       }
       
       // Don't capture if it's a special key that might interfere with browser
       if (e.key === "F12" || (e.key === "F5" && !e.ctrlKey)) {
         return; // Allow F12 (dev tools) and F5 (refresh) to work normally
+      }
+      
+      // Allow Escape to close modal
+      if (e.key === "Escape") {
+        closeRemoteAccess();
+        return;
       }
       
       e.preventDefault();
@@ -1584,21 +1639,31 @@
         meta
       };
       
-      console.log("Sending keyboard down:", eventData);
       socket.emit("remote_keyboard_event", eventData);
     }
     
     function handleRemoteKeyUp(e) {
       if (!activeRemoteNodeId || !remoteAccessActive) return;
+      
       const modal = document.getElementById("remoteAccessModal");
       if (!modal || modal.classList.contains("hidden")) return;
       
       const target = e.target;
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT")) {
+      if (target && (
+        target.tagName === "INPUT" || 
+        target.tagName === "TEXTAREA" || 
+        target.tagName === "SELECT" ||
+        target.tagName === "BUTTON" ||
+        target.isContentEditable
+      )) {
         return;
       }
       
       if (e.key === "F12" || (e.key === "F5" && !e.ctrlKey)) {
+        return;
+      }
+      
+      if (e.key === "Escape") {
         return;
       }
       
@@ -1624,7 +1689,6 @@
         meta
       };
       
-      console.log("Sending keyboard up:", eventData);
       socket.emit("remote_keyboard_event", eventData);
     }
     
