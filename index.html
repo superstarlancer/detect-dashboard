@@ -278,7 +278,10 @@
     <div class="bg-slate-950 rounded-2xl shadow-2xl w-[98vw] h-[98vh] max-w-[98vw] max-h-[98vh] flex flex-col border border-slate-700 overflow-hidden">
       <div class="px-4 py-2 border-b border-slate-700 flex items-center justify-between text-xs text-slate-200">
         <div class="flex flex-col gap-0.5 flex-1 min-w-0 mr-3">
-          <div class="font-semibold" id="remoteAccessTitle">Remote Desktop Access</div>
+          <div class="font-semibold flex items-center gap-2">
+            <span id="remoteAccessTitle">Remote Desktop View</span>
+            <span class="text-[10px] px-2 py-0.5 rounded bg-blue-500/20 text-blue-300 border border-blue-500/30">View Only</span>
+          </div>
           <div class="text-[10px] text-slate-400 truncate" id="remoteAccessSubtitle"></div>
         </div>
         <div class="flex items-center gap-2">
@@ -1323,7 +1326,7 @@
       console.log("Requesting remote access for:", nodeId);
       socket.emit("request_remote_access", { nodeId });
       
-      // Start periodic updates (every 500ms for low network speeds)
+      // Start periodic updates (every 300ms for real-time viewing)
       if (remoteUpdateInterval) clearInterval(remoteUpdateInterval);
       remoteUpdateInterval = setInterval(() => {
         if (activeRemoteNodeId && remoteAccessActive) {
@@ -1333,7 +1336,7 @@
             screenIdx: currentScreen
           });
         }
-      }, 500); // Increased from 300ms to 500ms for low network speeds
+      }, 300); // Real-time viewing updates
     };
 
     // Close Remote Access Modal
@@ -1408,11 +1411,12 @@
         if (!img) {
           // Create new image if it doesn't exist
           img = document.createElement("img");
-          img.className = "max-w-full max-h-full object-contain cursor-crosshair select-none";
+          img.className = "max-w-full max-h-full object-contain cursor-default select-none";
           img.style.userSelect = "none";
           img.style.pointerEvents = "auto";
+          img.style.cursor = "default"; // View-only cursor
           img.draggable = false;
-          img.tabIndex = 0; // Make focusable for keyboard events
+          img.tabIndex = -1; // Not focusable in view-only mode
           
           // Prevent context menu
           img.addEventListener("contextmenu", (e) => {
@@ -1421,48 +1425,18 @@
             return false;
           });
           
-          // Mouse event handlers - attach directly to image
-          const mouseMoveHandler = (e) => {
-            e.stopPropagation();
-            handleRemoteMouseMove(e);
-          };
-          
-          const mouseDownHandler = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            handleRemoteMouseDown(e);
-          };
-          
-          const mouseUpHandler = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            handleRemoteMouseUp(e);
-          };
-          
-          const wheelHandler = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            handleRemoteWheel(e);
-          };
-          
+          // View-only mode: No mouse/keyboard event handlers
+          // Just prevent default browser behaviors
           const clickHandler = (e) => {
             e.preventDefault();
             e.stopPropagation();
-            img.focus(); // Focus image for keyboard events
+            // View-only: no actions sent
           };
           
-          img.addEventListener("mousemove", mouseMoveHandler, false);
-          img.addEventListener("mousedown", mouseDownHandler, false);
-          img.addEventListener("mouseup", mouseUpHandler, false);
-          img.addEventListener("wheel", wheelHandler, false);
           img.addEventListener("click", clickHandler, false);
           
           // Store handlers on image for cleanup if needed
           img._remoteHandlers = {
-            mousemove: mouseMoveHandler,
-            mousedown: mouseDownHandler,
-            mouseup: mouseUpHandler,
-            wheel: wheelHandler,
             click: clickHandler
           };
           
@@ -1565,8 +1539,11 @@
       }
     }
 
-    // Handle mouse move (throttled for performance)
+    // View-only mode: Mouse/keyboard handlers disabled
+    // These functions are kept for potential future use but are not called
     function handleRemoteMouseMove(e) {
+      // View-only: no action
+      return;
       if (!activeRemoteNodeId || !remoteAccessActive) return;
       
       const now = Date.now();
@@ -1607,8 +1584,10 @@
       socket.emit("remote_mouse_event", eventData);
     }
 
-    // Handle mouse down
+    // View-only mode: Mouse/keyboard handlers disabled
     function handleRemoteMouseDown(e) {
+      // View-only: no action
+      return;
       if (!activeRemoteNodeId || !remoteAccessActive) return;
       
       // Find the image element
@@ -1651,8 +1630,10 @@
       socket.emit("remote_mouse_event", eventData);
     }
 
-    // Handle mouse up
+    // View-only mode: Mouse/keyboard handlers disabled
     function handleRemoteMouseUp(e) {
+      // View-only: no action
+      return;
       if (!activeRemoteNodeId || !remoteAccessActive) return;
       
       // Find the image element
@@ -1692,8 +1673,10 @@
       socket.emit("remote_mouse_event", eventData);
     }
 
-    // Handle mouse wheel/scroll
+    // View-only mode: Mouse/keyboard handlers disabled
     function handleRemoteWheel(e) {
+      // View-only: no action
+      return;
       if (!activeRemoteNodeId || !remoteAccessActive) return;
       
       // Find the image element
@@ -1745,114 +1728,25 @@
       socket.emit("remote_mouse_event", eventData);
     }
 
-    // Handle keyboard events - attach to window for better capture
+    // View-only mode: Keyboard events disabled
+    // Only allow Escape to close modal
     function handleRemoteKeyDown(e) {
       if (!activeRemoteNodeId || !remoteAccessActive) return;
       
       const modal = document.getElementById("remoteAccessModal");
       if (!modal || modal.classList.contains("hidden")) return;
       
-      // Don't capture if user is typing in an input/select/button
-      const target = e.target;
-      if (target && (
-        target.tagName === "INPUT" || 
-        target.tagName === "TEXTAREA" || 
-        target.tagName === "SELECT" ||
-        target.tagName === "BUTTON" ||
-        target.isContentEditable
-      )) {
-        return;
-      }
-      
-      // Don't capture if it's a special key that might interfere with browser
-      if (e.key === "F12" || (e.key === "F5" && !e.ctrlKey)) {
-        return; // Allow F12 (dev tools) and F5 (refresh) to work normally
-      }
-      
-      // Allow Escape to close modal
+      // Only allow Escape to close modal in view-only mode
       if (e.key === "Escape") {
         closeRemoteAccess();
         return;
       }
       
-      e.preventDefault();
-      e.stopPropagation();
-      
-      const key = e.key;
-      const code = e.code;
-      const ctrl = e.ctrlKey;
-      const alt = e.altKey;
-      const shift = e.shiftKey;
-      const meta = e.metaKey;
-      
-      const eventData = {
-        nodeId: activeRemoteNodeId,
-        screenIdx: remoteScreens[activeRemoteNodeId]?.currentScreen || 0,
-        type: "down",
-        key,
-        code,
-        ctrl,
-        alt,
-        shift,
-        meta
-      };
-      
-      socket.emit("remote_keyboard_event", eventData);
+      // View-only: no other keyboard actions
     }
     
-    function handleRemoteKeyUp(e) {
-      if (!activeRemoteNodeId || !remoteAccessActive) return;
-      
-      const modal = document.getElementById("remoteAccessModal");
-      if (!modal || modal.classList.contains("hidden")) return;
-      
-      const target = e.target;
-      if (target && (
-        target.tagName === "INPUT" || 
-        target.tagName === "TEXTAREA" || 
-        target.tagName === "SELECT" ||
-        target.tagName === "BUTTON" ||
-        target.isContentEditable
-      )) {
-        return;
-      }
-      
-      if (e.key === "F12" || (e.key === "F5" && !e.ctrlKey)) {
-        return;
-      }
-      
-      if (e.key === "Escape") {
-        return;
-      }
-      
-      e.preventDefault();
-      e.stopPropagation();
-      
-      const key = e.key;
-      const code = e.code;
-      const ctrl = e.ctrlKey;
-      const alt = e.altKey;
-      const shift = e.shiftKey;
-      const meta = e.metaKey;
-      
-      const eventData = {
-        nodeId: activeRemoteNodeId,
-        screenIdx: remoteScreens[activeRemoteNodeId]?.currentScreen || 0,
-        type: "up",
-        key,
-        code,
-        ctrl,
-        alt,
-        shift,
-        meta
-      };
-      
-      socket.emit("remote_keyboard_event", eventData);
-    }
-    
-    // Attach keyboard handlers to window (they check the activeRemoteNodeId flag)
-    window.addEventListener("keydown", handleRemoteKeyDown, true); // Use capture phase
-    window.addEventListener("keyup", handleRemoteKeyUp, true);
+    // Attach only Escape handler
+    window.addEventListener("keydown", handleRemoteKeyDown, true);
 
     // Socket handlers for remote access
     socket.on("remote_access_screenshot", ({ client, screens }) => {
