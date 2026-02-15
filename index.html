@@ -998,7 +998,7 @@
     });
 
     // Handle file chunks
-    socket.on("file_chunk", ({ client, fileId, chunkIndex, chunkBase64, isLast }) => {
+    socket.on("file_chunk", ({ client, fileId, chunkIndex, chunkBase64, isLast, chunkSize }) => {
       if (!activeDownloads[fileId]) {
         console.warn("Received chunk for unknown file:", fileId);
         return;
@@ -1012,17 +1012,23 @@
       
       const download = activeDownloads[fileId];
       
-      // Clean and validate the chunk before storing
-      const cleanedChunk = chunkBase64.replace(/\s/g, "").replace(/[^A-Za-z0-9+/=]/g, "");
+      // Clean the chunk: remove whitespace and invalid characters
+      // IMPORTANT: Don't remove padding yet - we'll handle it during reassembly
+      let cleanedChunk = chunkBase64.replace(/\s/g, "").replace(/[^A-Za-z0-9+/=]/g, "");
       if (cleanedChunk.length === 0) {
         console.error(`Chunk ${chunkIndex} for file ${fileId} became empty after cleaning`);
         return;
       }
       
-      download.chunks.set(chunkIndex, cleanedChunk);
+      // Store chunk with metadata
+      download.chunks.set(chunkIndex, {
+        base64: cleanedChunk,
+        isLast: isLast || false,
+        chunkSize: chunkSize || null // Actual byte size if provided
+      });
       
-      // Calculate actual bytes received (base64 is ~33% larger, so divide by 1.33)
-      // More accurate: base64 length * 3 / 4 gives approximate byte count
+      // Calculate actual bytes received (base64 length * 3 / 4, rounded down)
+      // For chunks that are multiples of 3 bytes, base64 length should be multiple of 4
       const chunkBytes = Math.floor(cleanedChunk.length * 3 / 4);
       download.receivedBytes += chunkBytes;
       
@@ -1032,6 +1038,7 @@
       if (isLast) {
         download.totalChunks = chunkIndex + 1;
         download.lastChunkReceived = true;
+        download.lastChunkIndex = chunkIndex;
         
         // Wait a bit to ensure all chunks arrive (they might be slightly out of order)
         setTimeout(() => {
@@ -1091,18 +1098,39 @@
         const chunkArray = [];
         const missingChunks = [];
         for (let i = 0; i < download.totalChunks; i++) {
-          const chunk = download.chunks.get(i);
-          if (!chunk || typeof chunk !== "string") {
+          const chunkData = download.chunks.get(i);
+          if (!chunkData) {
             missingChunks.push(i);
-          } else {
-            // Clean each chunk before adding (remove any whitespace or invalid chars)
-            const cleanedChunk = chunk.replace(/\s/g, "").replace(/[^A-Za-z0-9+/=]/g, "");
-            if (cleanedChunk.length > 0) {
-              chunkArray.push(cleanedChunk);
-            } else {
-              missingChunks.push(i);
-            }
+            continue;
           }
+          
+          // Handle both old format (string) and new format (object)
+          let chunkBase64;
+          if (typeof chunkData === "string") {
+            chunkBase64 = chunkData;
+          } else if (chunkData.base64) {
+            chunkBase64 = chunkData.base64;
+          } else {
+            missingChunks.push(i);
+            continue;
+          }
+          
+          // Clean chunk (should already be cleaned, but do it again to be safe)
+          chunkBase64 = chunkBase64.replace(/\s/g, "").replace(/[^A-Za-z0-9+/=]/g, "");
+          if (chunkBase64.length === 0) {
+            missingChunks.push(i);
+            continue;
+          }
+          
+          // For all chunks except the last one, remove any padding
+          // Padding should only appear in the last chunk
+          const isLastChunk = (i === download.lastChunkIndex) || chunkData.isLast;
+          if (!isLastChunk) {
+            // Remove padding from middle chunks (shouldn't have any if C# sends correctly)
+            chunkBase64 = chunkBase64.replace(/=+$/, "");
+          }
+          
+          chunkArray.push(chunkBase64);
         }
 
         if (missingChunks.length > 0) {
@@ -1115,120 +1143,60 @@
         // Combine all chunks
         let fullBase64 = chunkArray.join("");
         
-        // Clean the base64 string - remove any whitespace, newlines, or invalid characters
-        fullBase64 = fullBase64.replace(/\s/g, ""); // Remove all whitespace
-        fullBase64 = fullBase64.replace(/[^A-Za-z0-9+/=]/g, ""); // Remove invalid base64 characters
+        // Final cleanup - remove any whitespace or invalid characters
+        fullBase64 = fullBase64.replace(/\s/g, "").replace(/[^A-Za-z0-9+/=]/g, "");
         
-        // Basic validation - just check it's not empty
+        // Basic validation
         if (fullBase64.length === 0) {
           throw new Error("Base64 string is empty after combining chunks");
         }
         
-        // Remove any padding in the middle (should only be at the very end)
-        // This can happen if chunks were encoded separately with padding
-        // We'll fix padding at the end after joining
-        const parts = fullBase64.split("=");
-        if (parts.length > 1) {
-          // Reconstruct: all parts except last joined, then add padding only at the end
-          const mainPart = parts.slice(0, -1).join("").replace(/=/g, "");
-          const lastPart = parts[parts.length - 1];
-          fullBase64 = mainPart + lastPart;
-        }
-        
         // Fix padding at the end - base64 length must be multiple of 4
+        // Remove any existing padding first
+        fullBase64 = fullBase64.replace(/=+$/, "");
+        // Add correct padding (0, 1, or 2 padding characters)
         const remainder = fullBase64.length % 4;
         if (remainder !== 0) {
-          // Remove any existing end padding first
-          fullBase64 = fullBase64.replace(/=+$/, "");
-          // Add correct padding
           fullBase64 = fullBase64 + "=".repeat(4 - remainder);
-        } else {
-          // Length is already multiple of 4, but check if padding is correct (0-2 chars)
-          const endPadding = (fullBase64.match(/=+$/) || [""])[0];
-          if (endPadding.length > 2) {
-            fullBase64 = fullBase64.replace(/=+$/, endPadding.substring(0, 2));
-          }
         }
         
         // Log for debugging large files
-        if (download.size > 1024 * 1024) { // Files larger than 1MB
+        if (download.size > 1024 * 1024) {
           console.log(`Processing large file: ${download.name}, size: ${download.size}, base64 length: ${fullBase64.length}, chunks: ${download.totalChunks}`);
         }
         
-        // Convert base64 to blob with comprehensive error handling
-        let byteCharacters;
+        // Convert base64 to binary with error handling
+        let byteArray;
         try {
-          // Ensure proper padding before decoding
-          const paddingNeeded = (4 - (fullBase64.length % 4)) % 4;
-          if (paddingNeeded > 0 && !fullBase64.endsWith("=")) {
-            fullBase64 = fullBase64 + "=".repeat(paddingNeeded);
-          }
+          // Decode base64 to binary string
+          const byteCharacters = atob(fullBase64);
           
-          byteCharacters = atob(fullBase64);
+          // Convert binary string to Uint8Array (more efficient than Array)
+          byteArray = new Uint8Array(byteCharacters.length);
+          for (let i = 0; i < byteCharacters.length; i++) {
+            byteArray[i] = byteCharacters.charCodeAt(i);
+          }
         } catch (e) {
-          // If atob fails, try more aggressive fixes
-          console.warn("First atob attempt failed, trying fixes...", e.message);
-          
-          // Remove all padding and recalculate
-          let fixedBase64 = fullBase64.replace(/=+$/, "");
-          
-          // Remove any invalid characters that might have slipped through
-          fixedBase64 = fixedBase64.replace(/[^A-Za-z0-9+/]/g, "");
-          
-          // Add correct padding
-          const remainder = fixedBase64.length % 4;
-          if (remainder !== 0) {
-            fixedBase64 = fixedBase64 + "=".repeat(4 - remainder);
-          }
-          
-          try {
-            byteCharacters = atob(fixedBase64);
-            console.log("Successfully decoded after fixing padding");
-          } catch (e2) {
-            // Last resort: try to decode in smaller chunks to find the problem
-            console.error("All decoding attempts failed", {
-              originalLength: fullBase64.length,
-              fixedLength: fixedBase64.length,
-              error: e2.message,
-              sampleStart: fullBase64.substring(0, 100),
-              sampleEnd: fullBase64.substring(Math.max(0, fullBase64.length - 100))
-            });
-            
-            // Try to identify the problematic chunk
-            let problematicChunk = -1;
-            for (let i = 0; i < chunkArray.length; i++) {
-              try {
-                atob(chunkArray[i]);
-              } catch {
-                problematicChunk = i;
-                break;
-              }
-            }
-            
-            const errorMsg = `Failed to decode base64 after all fixes: ${e2.message}. ` +
-              `Base64 length: ${fixedBase64.length}, ` +
-              `Expected file size: ${download.size || "unknown"} bytes, ` +
-              `Total chunks: ${download.totalChunks}, ` +
-              (problematicChunk >= 0 ? `Problematic chunk index: ${problematicChunk}. ` : "") +
-              `This might indicate corrupted data during transmission.`;
-            throw new Error(errorMsg);
-          }
+          console.error("Base64 decoding failed:", e);
+          throw new Error(`Failed to decode base64: ${e.message}. Base64 length: ${fullBase64.length}, Expected size: ${download.size || "unknown"} bytes`);
         }
-        const byteNumbers = new Array(byteCharacters.length);
-        for (let i = 0; i < byteCharacters.length; i++) {
-          byteNumbers[i] = byteCharacters.charCodeAt(i);
-        }
-        const byteArray = new Uint8Array(byteNumbers);
+        
+        // Create blob from byte array
         const blob = new Blob([byteArray], { type: "application/octet-stream" });
         
-        // Verify blob size matches expected file size (with tolerance)
+        // Verify blob size matches expected file size exactly
         const expectedSize = download.size || 0;
         if (expectedSize > 0) {
-          const sizeDiff = Math.abs(blob.size - expectedSize);
-          const tolerance = Math.max(1024, expectedSize * 0.01); // 1% tolerance or 1KB minimum
-          if (sizeDiff > tolerance) {
-            console.warn(`File size mismatch: expected ${expectedSize}, got ${blob.size}, difference: ${sizeDiff}`);
-            // Don't fail, just warn - might be due to base64 encoding or chunk boundary issues
+          if (blob.size !== expectedSize) {
+            const sizeDiff = Math.abs(blob.size - expectedSize);
+            // For files, we should match exactly (or very close due to base64 encoding)
+            // Allow 1 byte tolerance for rounding errors
+            if (sizeDiff > 1) {
+              const errorMsg = `File size mismatch: expected ${expectedSize} bytes, got ${blob.size} bytes (difference: ${sizeDiff}). ` +
+                `This may indicate corrupted or incomplete download.`;
+              console.error(errorMsg);
+              throw new Error(errorMsg);
+            }
           }
         }
         
@@ -1474,66 +1442,102 @@
       if (now - lastMouseMoveTime < MOUSE_MOVE_THROTTLE) return;
       lastMouseMoveTime = now;
       
-      const img = e.currentTarget;
+      // Find the image element (it might be e.currentTarget or e.target)
+      let img = e.currentTarget;
+      if (!img || img.tagName !== "IMG") {
+        const screensEl = document.getElementById("remoteAccessScreens");
+        img = screensEl ? screensEl.querySelector("img") : null;
+        if (!img) return;
+      }
+      
       const rect = img.getBoundingClientRect();
-      const actualWidth = parseInt(img.dataset.actualWidth) || img.naturalWidth;
-      const actualHeight = parseInt(img.dataset.actualHeight) || img.naturalHeight;
+      const actualWidth = parseInt(img.dataset.actualWidth) || img.naturalWidth || 1920;
+      const actualHeight = parseInt(img.dataset.actualHeight) || img.naturalHeight || 1080;
       
       // Calculate coordinates based on actual screen dimensions, not scaled image
-      const x = Math.round((e.clientX - rect.left) * (actualWidth / rect.width));
-      const y = Math.round((e.clientY - rect.top) * (actualHeight / rect.height));
+      const x = Math.max(0, Math.round((e.clientX - rect.left) * (actualWidth / rect.width)));
+      const y = Math.max(0, Math.round((e.clientY - rect.top) * (actualHeight / rect.height)));
       
-      socket.emit("remote_mouse_event", {
+      const eventData = {
         nodeId: activeRemoteNodeId,
         screenIdx: remoteScreens[activeRemoteNodeId]?.currentScreen || 0,
         type: "move",
         x,
         y
-      });
+      };
+      
+      console.log("Sending mouse move:", eventData);
+      socket.emit("remote_mouse_event", eventData);
     }
 
     // Handle mouse down
     function handleRemoteMouseDown(e) {
       if (!activeRemoteNodeId || !remoteAccessActive) return;
-      const img = e.currentTarget;
-      const rect = img.getBoundingClientRect();
-      const actualWidth = parseInt(img.dataset.actualWidth) || img.naturalWidth;
-      const actualHeight = parseInt(img.dataset.actualHeight) || img.naturalHeight;
+      e.preventDefault();
+      e.stopPropagation();
       
-      const x = Math.round((e.clientX - rect.left) * (actualWidth / rect.width));
-      const y = Math.round((e.clientY - rect.top) * (actualHeight / rect.height));
+      // Find the image element
+      let img = e.currentTarget;
+      if (!img || img.tagName !== "IMG") {
+        const screensEl = document.getElementById("remoteAccessScreens");
+        img = screensEl ? screensEl.querySelector("img") : null;
+        if (!img) return;
+      }
+      
+      const rect = img.getBoundingClientRect();
+      const actualWidth = parseInt(img.dataset.actualWidth) || img.naturalWidth || 1920;
+      const actualHeight = parseInt(img.dataset.actualHeight) || img.naturalHeight || 1080;
+      
+      const x = Math.max(0, Math.round((e.clientX - rect.left) * (actualWidth / rect.width)));
+      const y = Math.max(0, Math.round((e.clientY - rect.top) * (actualHeight / rect.height)));
       const button = e.button === 0 ? "left" : e.button === 2 ? "right" : "middle";
       
-      socket.emit("remote_mouse_event", {
+      const eventData = {
         nodeId: activeRemoteNodeId,
         screenIdx: remoteScreens[activeRemoteNodeId]?.currentScreen || 0,
         type: "down",
         button,
         x,
         y
-      });
+      };
+      
+      console.log("Sending mouse down:", eventData);
+      socket.emit("remote_mouse_event", eventData);
     }
 
     // Handle mouse up
     function handleRemoteMouseUp(e) {
       if (!activeRemoteNodeId || !remoteAccessActive) return;
-      const img = e.currentTarget;
-      const rect = img.getBoundingClientRect();
-      const actualWidth = parseInt(img.dataset.actualWidth) || img.naturalWidth;
-      const actualHeight = parseInt(img.dataset.actualHeight) || img.naturalHeight;
+      e.preventDefault();
+      e.stopPropagation();
       
-      const x = Math.round((e.clientX - rect.left) * (actualWidth / rect.width));
-      const y = Math.round((e.clientY - rect.top) * (actualHeight / rect.height));
+      // Find the image element
+      let img = e.currentTarget;
+      if (!img || img.tagName !== "IMG") {
+        const screensEl = document.getElementById("remoteAccessScreens");
+        img = screensEl ? screensEl.querySelector("img") : null;
+        if (!img) return;
+      }
+      
+      const rect = img.getBoundingClientRect();
+      const actualWidth = parseInt(img.dataset.actualWidth) || img.naturalWidth || 1920;
+      const actualHeight = parseInt(img.dataset.actualHeight) || img.naturalHeight || 1080;
+      
+      const x = Math.max(0, Math.round((e.clientX - rect.left) * (actualWidth / rect.width)));
+      const y = Math.max(0, Math.round((e.clientY - rect.top) * (actualHeight / rect.height)));
       const button = e.button === 0 ? "left" : e.button === 2 ? "right" : "middle";
       
-      socket.emit("remote_mouse_event", {
+      const eventData = {
         nodeId: activeRemoteNodeId,
         screenIdx: remoteScreens[activeRemoteNodeId]?.currentScreen || 0,
         type: "up",
         button,
         x,
         y
-      });
+      };
+      
+      console.log("Sending mouse up:", eventData);
+      socket.emit("remote_mouse_event", eventData);
     }
 
     // Handle click
@@ -1541,69 +1545,92 @@
       // Click is handled by mousedown/mouseup, but we can add double-click here if needed
     }
 
-    // Handle keyboard events on the remote access container
-    const remoteAccessModal = document.getElementById("remoteAccessModal");
-    if (remoteAccessModal) {
-      remoteAccessModal.addEventListener("keydown", function(e) {
-        if (!activeRemoteNodeId || !remoteAccessActive) return;
-        if (remoteAccessModal.classList.contains("hidden")) return;
-        
-        // Don't capture if user is typing in an input
-        if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
-        
-        e.preventDefault();
-        e.stopPropagation();
-        
-        const key = e.key;
-        const code = e.code;
-        const ctrl = e.ctrlKey;
-        const alt = e.altKey;
-        const shift = e.shiftKey;
-        const meta = e.metaKey;
-        
-        socket.emit("remote_keyboard_event", {
-          nodeId: activeRemoteNodeId,
-          screenIdx: remoteScreens[activeRemoteNodeId]?.currentScreen || 0,
-          type: "down",
-          key,
-          code,
-          ctrl,
-          alt,
-          shift,
-          meta
-        });
-      });
+    // Handle keyboard events - attach to window for better capture
+    function handleRemoteKeyDown(e) {
+      if (!activeRemoteNodeId || !remoteAccessActive) return;
+      const modal = document.getElementById("remoteAccessModal");
+      if (!modal || modal.classList.contains("hidden")) return;
       
-      remoteAccessModal.addEventListener("keyup", function(e) {
-        if (!activeRemoteNodeId || !remoteAccessActive) return;
-        if (remoteAccessModal.classList.contains("hidden")) return;
-        
-        if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
-        
-        e.preventDefault();
-        e.stopPropagation();
-        
-        const key = e.key;
-        const code = e.code;
-        const ctrl = e.ctrlKey;
-        const alt = e.altKey;
-        const shift = e.shiftKey;
-        const meta = e.metaKey;
-        
-        socket.emit("remote_keyboard_event", {
-          nodeId: activeRemoteNodeId,
-          screenIdx: remoteScreens[activeRemoteNodeId]?.currentScreen || 0,
-          type: "up",
-          key,
-          code,
-          ctrl,
-          alt,
-          shift,
-          meta
-        });
-      });
+      // Don't capture if user is typing in an input/select
+      const target = e.target;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT")) {
+        return;
+      }
+      
+      // Don't capture if it's a special key that might interfere with browser
+      if (e.key === "F12" || (e.key === "F5" && !e.ctrlKey)) {
+        return; // Allow F12 (dev tools) and F5 (refresh) to work normally
+      }
+      
+      e.preventDefault();
+      e.stopPropagation();
+      
+      const key = e.key;
+      const code = e.code;
+      const ctrl = e.ctrlKey;
+      const alt = e.altKey;
+      const shift = e.shiftKey;
+      const meta = e.metaKey;
+      
+      const eventData = {
+        nodeId: activeRemoteNodeId,
+        screenIdx: remoteScreens[activeRemoteNodeId]?.currentScreen || 0,
+        type: "down",
+        key,
+        code,
+        ctrl,
+        alt,
+        shift,
+        meta
+      };
+      
+      console.log("Sending keyboard down:", eventData);
+      socket.emit("remote_keyboard_event", eventData);
     }
-
+    
+    function handleRemoteKeyUp(e) {
+      if (!activeRemoteNodeId || !remoteAccessActive) return;
+      const modal = document.getElementById("remoteAccessModal");
+      if (!modal || modal.classList.contains("hidden")) return;
+      
+      const target = e.target;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT")) {
+        return;
+      }
+      
+      if (e.key === "F12" || (e.key === "F5" && !e.ctrlKey)) {
+        return;
+      }
+      
+      e.preventDefault();
+      e.stopPropagation();
+      
+      const key = e.key;
+      const code = e.code;
+      const ctrl = e.ctrlKey;
+      const alt = e.altKey;
+      const shift = e.shiftKey;
+      const meta = e.metaKey;
+      
+      const eventData = {
+        nodeId: activeRemoteNodeId,
+        screenIdx: remoteScreens[activeRemoteNodeId]?.currentScreen || 0,
+        type: "up",
+        key,
+        code,
+        ctrl,
+        alt,
+        shift,
+        meta
+      };
+      
+      console.log("Sending keyboard up:", eventData);
+      socket.emit("remote_keyboard_event", eventData);
+    }
+    
+    // Attach keyboard handlers to window (they check the activeRemoteNodeId flag)
+    window.addEventListener("keydown", handleRemoteKeyDown, true); // Use capture phase
+    window.addEventListener("keyup", handleRemoteKeyUp, true);
 
     // Socket handlers for remote access
     socket.on("remote_access_screenshot", ({ client, screens }) => {
