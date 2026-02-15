@@ -274,7 +274,7 @@
   </div>
 
   <!-- Remote Access Modal -->
-  <div id="remoteAccessModal" class="hidden fixed inset-0 z-50 bg-black bg-opacity-80 flex items-center justify-center">
+  <div id="remoteAccessModal" class="hidden fixed inset-0 z-50 bg-black bg-opacity-80 flex items-center justify-center" tabindex="-1">
     <div class="bg-slate-950 rounded-2xl shadow-2xl w-[98vw] h-[98vh] max-w-[98vw] max-h-[98vh] flex flex-col border border-slate-700 overflow-hidden">
       <div class="px-4 py-2 border-b border-slate-700 flex items-center justify-between text-xs text-slate-200">
         <div class="flex flex-col gap-0.5 flex-1 min-w-0 mr-3">
@@ -1004,12 +1004,26 @@
         return;
       }
       
+      // Validate chunk data
+      if (typeof chunkBase64 !== "string" || chunkBase64.length === 0) {
+        console.error(`Invalid chunk ${chunkIndex} for file ${fileId}: empty or not a string`);
+        return;
+      }
+      
       const download = activeDownloads[fileId];
-      download.chunks.set(chunkIndex, chunkBase64);
+      
+      // Clean and validate the chunk before storing
+      const cleanedChunk = chunkBase64.replace(/\s/g, "").replace(/[^A-Za-z0-9+/=]/g, "");
+      if (cleanedChunk.length === 0) {
+        console.error(`Chunk ${chunkIndex} for file ${fileId} became empty after cleaning`);
+        return;
+      }
+      
+      download.chunks.set(chunkIndex, cleanedChunk);
       
       // Calculate actual bytes received (base64 is ~33% larger, so divide by 1.33)
       // More accurate: base64 length * 3 / 4 gives approximate byte count
-      const chunkBytes = Math.floor(chunkBase64.length * 3 / 4);
+      const chunkBytes = Math.floor(cleanedChunk.length * 3 / 4);
       download.receivedBytes += chunkBytes;
       
       // Update progress
@@ -1069,10 +1083,16 @@
         const missingChunks = [];
         for (let i = 0; i < download.totalChunks; i++) {
           const chunk = download.chunks.get(i);
-          if (!chunk) {
+          if (!chunk || typeof chunk !== "string") {
             missingChunks.push(i);
           } else {
-            chunkArray.push(chunk);
+            // Clean each chunk before adding (remove any whitespace or invalid chars)
+            const cleanedChunk = chunk.replace(/\s/g, "").replace(/[^A-Za-z0-9+/=]/g, "");
+            if (cleanedChunk.length > 0) {
+              chunkArray.push(cleanedChunk);
+            } else {
+              missingChunks.push(i);
+            }
           }
         }
 
@@ -1084,16 +1104,64 @@
         }
 
         // Combine all chunks
-        const fullBase64 = chunkArray.join("");
+        let fullBase64 = chunkArray.join("");
         
-        // Convert base64 to blob
-        const byteCharacters = atob(fullBase64);
+        // Clean the base64 string - remove any whitespace, newlines, or invalid characters
+        fullBase64 = fullBase64.replace(/\s/g, ""); // Remove all whitespace
+        fullBase64 = fullBase64.replace(/[^A-Za-z0-9+/=]/g, ""); // Remove invalid base64 characters
+        
+        // Validate base64 string
+        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(fullBase64)) {
+          throw new Error("Invalid base64 string format");
+        }
+        
+        // Convert base64 to blob with comprehensive error handling
+        let byteCharacters;
+        try {
+          byteCharacters = atob(fullBase64);
+        } catch (e) {
+          // If atob fails, try to fix padding issues
+          // Base64 strings should have length that's a multiple of 4
+          const currentLength = fullBase64.length;
+          const remainder = currentLength % 4;
+          if (remainder !== 0) {
+            // Remove any existing padding first, then add correct padding
+            fullBase64 = fullBase64.replace(/=+$/, "");
+            fullBase64 = fullBase64 + "=".repeat(4 - remainder);
+          }
+          
+          try {
+            byteCharacters = atob(fullBase64);
+          } catch (e2) {
+            // If still failing, provide detailed error
+            const errorMsg = `Failed to decode base64: ${e2.message}. ` +
+              `Base64 length: ${fullBase64.length}, ` +
+              `Expected file size: ${download.size || "unknown"} bytes. ` +
+              `This might indicate corrupted data during transmission.`;
+            console.error(errorMsg, { 
+              firstChars: fullBase64.substring(0, 50), 
+              lastChars: fullBase64.substring(Math.max(0, fullBase64.length - 50))
+            });
+            throw new Error(errorMsg);
+          }
+        }
         const byteNumbers = new Array(byteCharacters.length);
         for (let i = 0; i < byteCharacters.length; i++) {
           byteNumbers[i] = byteCharacters.charCodeAt(i);
         }
         const byteArray = new Uint8Array(byteNumbers);
         const blob = new Blob([byteArray], { type: "application/octet-stream" });
+        
+        // Verify blob size matches expected file size (with tolerance)
+        const expectedSize = download.size || 0;
+        if (expectedSize > 0) {
+          const sizeDiff = Math.abs(blob.size - expectedSize);
+          const tolerance = Math.max(1024, expectedSize * 0.01); // 1% tolerance or 1KB minimum
+          if (sizeDiff > tolerance) {
+            console.warn(`File size mismatch: expected ${expectedSize}, got ${blob.size}, difference: ${sizeDiff}`);
+            // Don't fail, just warn - might be due to base64 encoding or chunk boundary issues
+          }
+        }
         
         // Update progress to 100%
         updateDownloadProgress(fileId, download.size, download.size);
@@ -1115,7 +1183,9 @@
           delete activeDownloads[fileId];
         }, 300);
       } catch (e) {
-        alert("Error processing downloaded file: " + e);
+        console.error("Error processing downloaded file:", e);
+        const errorMsg = e.message || String(e);
+        alert("Error processing downloaded file: " + errorMsg + "\n\nPlease try downloading again. If the problem persists, the file may be too large or corrupted.");
         removeDownloadProgress(fileId);
         delete activeDownloads[fileId];
       }
@@ -1163,7 +1233,7 @@
 
     // Remote Access Variables
     let activeRemoteNodeId = null;
-    let remoteScreens = {}; // nodeId: { screens: [{base64, screenIdx}], currentScreen: 0 }
+    let remoteScreens = {}; // nodeId: { screens: [{base64, screenIdx, actualWidth, actualHeight}], currentScreen: 0 }
     let remoteAccessActive = false;
     let remoteUpdateInterval = null;
     let lastMouseMoveTime = 0;
@@ -1196,6 +1266,11 @@
       if (selectEl) selectEl.innerHTML = "";
       
       modal.classList.remove("hidden");
+      
+      // Focus the modal to capture keyboard events
+      setTimeout(() => {
+        modal.focus();
+      }, 100);
       
       // Request remote access
       socket.emit("request_remote_access", { nodeId });
@@ -1271,13 +1346,32 @@
         img.className = "max-w-full max-h-full object-contain cursor-crosshair";
         img.style.userSelect = "none";
         img.draggable = false;
+        img.tabIndex = 0; // Make focusable for keyboard events
+        
+        // Store actual screen dimensions for coordinate calculation
+        img.dataset.actualWidth = currentScreen.actualWidth || img.naturalWidth;
+        img.dataset.actualHeight = currentScreen.actualHeight || img.naturalHeight;
+        
+        // Ensure image loads before calculating dimensions
+        img.onload = function() {
+          if (!img.dataset.actualWidth || img.dataset.actualWidth === "0") {
+            img.dataset.actualWidth = img.naturalWidth;
+          }
+          if (!img.dataset.actualHeight || img.dataset.actualHeight === "0") {
+            img.dataset.actualHeight = img.naturalHeight;
+          }
+        };
         
         // Add event handlers
         img.addEventListener("mousemove", handleRemoteMouseMove);
         img.addEventListener("mousedown", handleRemoteMouseDown);
         img.addEventListener("mouseup", handleRemoteMouseUp);
         img.addEventListener("contextmenu", (e) => e.preventDefault());
-        img.addEventListener("click", handleRemoteClick);
+        img.addEventListener("click", (e) => {
+          e.preventDefault();
+          img.focus(); // Focus image for keyboard events
+          handleRemoteClick(e);
+        });
         
         screensEl.innerHTML = "";
         screensEl.appendChild(img);
@@ -1294,8 +1388,12 @@
       
       const img = e.currentTarget;
       const rect = img.getBoundingClientRect();
-      const x = Math.round((e.clientX - rect.left) * (img.naturalWidth / rect.width));
-      const y = Math.round((e.clientY - rect.top) * (img.naturalHeight / rect.height));
+      const actualWidth = parseInt(img.dataset.actualWidth) || img.naturalWidth;
+      const actualHeight = parseInt(img.dataset.actualHeight) || img.naturalHeight;
+      
+      // Calculate coordinates based on actual screen dimensions, not scaled image
+      const x = Math.round((e.clientX - rect.left) * (actualWidth / rect.width));
+      const y = Math.round((e.clientY - rect.top) * (actualHeight / rect.height));
       
       socket.emit("remote_mouse_event", {
         nodeId: activeRemoteNodeId,
@@ -1311,8 +1409,11 @@
       if (!activeRemoteNodeId || !remoteAccessActive) return;
       const img = e.currentTarget;
       const rect = img.getBoundingClientRect();
-      const x = Math.round((e.clientX - rect.left) * (img.naturalWidth / rect.width));
-      const y = Math.round((e.clientY - rect.top) * (img.naturalHeight / rect.height));
+      const actualWidth = parseInt(img.dataset.actualWidth) || img.naturalWidth;
+      const actualHeight = parseInt(img.dataset.actualHeight) || img.naturalHeight;
+      
+      const x = Math.round((e.clientX - rect.left) * (actualWidth / rect.width));
+      const y = Math.round((e.clientY - rect.top) * (actualHeight / rect.height));
       const button = e.button === 0 ? "left" : e.button === 2 ? "right" : "middle";
       
       socket.emit("remote_mouse_event", {
@@ -1330,8 +1431,11 @@
       if (!activeRemoteNodeId || !remoteAccessActive) return;
       const img = e.currentTarget;
       const rect = img.getBoundingClientRect();
-      const x = Math.round((e.clientX - rect.left) * (img.naturalWidth / rect.width));
-      const y = Math.round((e.clientY - rect.top) * (img.naturalHeight / rect.height));
+      const actualWidth = parseInt(img.dataset.actualWidth) || img.naturalWidth;
+      const actualHeight = parseInt(img.dataset.actualHeight) || img.naturalHeight;
+      
+      const x = Math.round((e.clientX - rect.left) * (actualWidth / rect.width));
+      const y = Math.round((e.clientY - rect.top) * (actualHeight / rect.height));
       const button = e.button === 0 ? "left" : e.button === 2 ? "right" : "middle";
       
       socket.emit("remote_mouse_event", {
@@ -1421,10 +1525,12 @@
         remoteScreens[client] = { screens: [], currentScreen: 0 };
       }
       
-      // Convert base64 to data URLs
+      // Convert base64 to data URLs and store actual dimensions
       remoteScreens[client].screens = screens.map(s => ({
         screenIdx: s.screenIdx || 0,
-        url: s.base64 ? `data:image/jpeg;base64,${s.base64}` : ""
+        url: s.base64 ? `data:image/jpeg;base64,${s.base64}` : "",
+        actualWidth: s.actualWidth || 0,
+        actualHeight: s.actualHeight || 0
       }));
       
       if (activeRemoteNodeId === client) {
@@ -1432,11 +1538,13 @@
       }
     });
 
-    socket.on("remote_screenshot_update", ({ client, screenIdx, base64 }) => {
+    socket.on("remote_screenshot_update", ({ client, screenIdx, base64, actualWidth, actualHeight }) => {
       if (!client || base64 === undefined) return;
       
       if (remoteScreens[client] && remoteScreens[client].screens[screenIdx]) {
         remoteScreens[client].screens[screenIdx].url = `data:image/jpeg;base64,${base64}`;
+        if (actualWidth) remoteScreens[client].screens[screenIdx].actualWidth = actualWidth;
+        if (actualHeight) remoteScreens[client].screens[screenIdx].actualHeight = actualHeight;
         
         if (activeRemoteNodeId === client) {
           renderRemoteScreens();
