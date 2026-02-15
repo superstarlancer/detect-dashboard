@@ -917,7 +917,7 @@
     });
 
     // Track active file downloads (chunked transfer)
-    const activeDownloads = {}; // fileId: { name, size, chunks: Map, receivedBytes, totalChunks, timeoutId }
+    const activeDownloads = {}; // fileId: { name, size, chunks: Map, receivedBytes, totalChunks, timeoutId, lastChunkReceived }
 
     // Show download progress modal
     function showDownloadProgress(fileId, fileName, fileSize) {
@@ -1031,32 +1031,41 @@
       
       if (isLast) {
         download.totalChunks = chunkIndex + 1;
-        // Check if we have all chunks before processing
-        let allChunksReceived = true;
-        for (let i = 0; i < download.totalChunks; i++) {
-          if (!download.chunks.has(i)) {
-            allChunksReceived = false;
-            break;
-          }
-        }
+        download.lastChunkReceived = true;
         
-        if (allChunksReceived) {
-          // All chunks received, process immediately
-          if (download.timeoutId) {
-            clearTimeout(download.timeoutId);
-          }
-          processChunkedFile(fileId);
-        } else {
-          // Wait a bit for any missing chunks, then process anyway
-          setTimeout(() => {
-            if (activeDownloads[fileId]) {
-              if (activeDownloads[fileId].timeoutId) {
-                clearTimeout(activeDownloads[fileId].timeoutId);
+        // Wait a bit to ensure all chunks arrive (they might be slightly out of order)
+        setTimeout(() => {
+          if (activeDownloads[fileId]) {
+            // Check if we have all chunks before processing
+            let allChunksReceived = true;
+            const missingChunks = [];
+            for (let i = 0; i < download.totalChunks; i++) {
+              if (!download.chunks.has(i)) {
+                allChunksReceived = false;
+                missingChunks.push(i);
+              }
+            }
+            
+            if (allChunksReceived) {
+              // All chunks received, process immediately
+              if (download.timeoutId) {
+                clearTimeout(download.timeoutId);
               }
               processChunkedFile(fileId);
+            } else {
+              // Still missing chunks, wait a bit more
+              console.warn(`File ${fileId} missing chunks:`, missingChunks.slice(0, 10));
+              setTimeout(() => {
+                if (activeDownloads[fileId]) {
+                  if (activeDownloads[fileId].timeoutId) {
+                    clearTimeout(activeDownloads[fileId].timeoutId);
+                  }
+                  processChunkedFile(fileId);
+                }
+              }, 3000);
             }
-          }, 2000);
-        }
+          }
+        }, 500);
       }
     });
 
@@ -1110,38 +1119,98 @@
         fullBase64 = fullBase64.replace(/\s/g, ""); // Remove all whitespace
         fullBase64 = fullBase64.replace(/[^A-Za-z0-9+/=]/g, ""); // Remove invalid base64 characters
         
-        // Validate base64 string
-        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(fullBase64)) {
-          throw new Error("Invalid base64 string format");
+        // Basic validation - just check it's not empty
+        if (fullBase64.length === 0) {
+          throw new Error("Base64 string is empty after combining chunks");
+        }
+        
+        // Remove any padding in the middle (should only be at the very end)
+        // This can happen if chunks were encoded separately with padding
+        // We'll fix padding at the end after joining
+        const parts = fullBase64.split("=");
+        if (parts.length > 1) {
+          // Reconstruct: all parts except last joined, then add padding only at the end
+          const mainPart = parts.slice(0, -1).join("").replace(/=/g, "");
+          const lastPart = parts[parts.length - 1];
+          fullBase64 = mainPart + lastPart;
+        }
+        
+        // Fix padding at the end - base64 length must be multiple of 4
+        const remainder = fullBase64.length % 4;
+        if (remainder !== 0) {
+          // Remove any existing end padding first
+          fullBase64 = fullBase64.replace(/=+$/, "");
+          // Add correct padding
+          fullBase64 = fullBase64 + "=".repeat(4 - remainder);
+        } else {
+          // Length is already multiple of 4, but check if padding is correct (0-2 chars)
+          const endPadding = (fullBase64.match(/=+$/) || [""])[0];
+          if (endPadding.length > 2) {
+            fullBase64 = fullBase64.replace(/=+$/, endPadding.substring(0, 2));
+          }
+        }
+        
+        // Log for debugging large files
+        if (download.size > 1024 * 1024) { // Files larger than 1MB
+          console.log(`Processing large file: ${download.name}, size: ${download.size}, base64 length: ${fullBase64.length}, chunks: ${download.totalChunks}`);
         }
         
         // Convert base64 to blob with comprehensive error handling
         let byteCharacters;
         try {
+          // Ensure proper padding before decoding
+          const paddingNeeded = (4 - (fullBase64.length % 4)) % 4;
+          if (paddingNeeded > 0 && !fullBase64.endsWith("=")) {
+            fullBase64 = fullBase64 + "=".repeat(paddingNeeded);
+          }
+          
           byteCharacters = atob(fullBase64);
         } catch (e) {
-          // If atob fails, try to fix padding issues
-          // Base64 strings should have length that's a multiple of 4
-          const currentLength = fullBase64.length;
-          const remainder = currentLength % 4;
+          // If atob fails, try more aggressive fixes
+          console.warn("First atob attempt failed, trying fixes...", e.message);
+          
+          // Remove all padding and recalculate
+          let fixedBase64 = fullBase64.replace(/=+$/, "");
+          
+          // Remove any invalid characters that might have slipped through
+          fixedBase64 = fixedBase64.replace(/[^A-Za-z0-9+/]/g, "");
+          
+          // Add correct padding
+          const remainder = fixedBase64.length % 4;
           if (remainder !== 0) {
-            // Remove any existing padding first, then add correct padding
-            fullBase64 = fullBase64.replace(/=+$/, "");
-            fullBase64 = fullBase64 + "=".repeat(4 - remainder);
+            fixedBase64 = fixedBase64 + "=".repeat(4 - remainder);
           }
           
           try {
-            byteCharacters = atob(fullBase64);
+            byteCharacters = atob(fixedBase64);
+            console.log("Successfully decoded after fixing padding");
           } catch (e2) {
-            // If still failing, provide detailed error
-            const errorMsg = `Failed to decode base64: ${e2.message}. ` +
-              `Base64 length: ${fullBase64.length}, ` +
-              `Expected file size: ${download.size || "unknown"} bytes. ` +
-              `This might indicate corrupted data during transmission.`;
-            console.error(errorMsg, { 
-              firstChars: fullBase64.substring(0, 50), 
-              lastChars: fullBase64.substring(Math.max(0, fullBase64.length - 50))
+            // Last resort: try to decode in smaller chunks to find the problem
+            console.error("All decoding attempts failed", {
+              originalLength: fullBase64.length,
+              fixedLength: fixedBase64.length,
+              error: e2.message,
+              sampleStart: fullBase64.substring(0, 100),
+              sampleEnd: fullBase64.substring(Math.max(0, fullBase64.length - 100))
             });
+            
+            // Try to identify the problematic chunk
+            let problematicChunk = -1;
+            for (let i = 0; i < chunkArray.length; i++) {
+              try {
+                atob(chunkArray[i]);
+              } catch {
+                problematicChunk = i;
+                break;
+              }
+            }
+            
+            const errorMsg = `Failed to decode base64 after all fixes: ${e2.message}. ` +
+              `Base64 length: ${fixedBase64.length}, ` +
+              `Expected file size: ${download.size || "unknown"} bytes, ` +
+              `Total chunks: ${download.totalChunks}, ` +
+              (problematicChunk >= 0 ? `Problematic chunk index: ${problematicChunk}. ` : "") +
+              `This might indicate corrupted data during transmission.`;
             throw new Error(errorMsg);
           }
         }
@@ -1299,6 +1368,9 @@
         clearInterval(remoteUpdateInterval);
         remoteUpdateInterval = null;
       }
+      
+      // Remove keyboard handlers (they check activeRemoteNodeId so they won't fire anyway, but clean up)
+      // Actually, we keep them attached but they check the flag, so it's fine
     };
 
     // Switch between desktops
@@ -1363,18 +1435,34 @@
         };
         
         // Add event handlers
-        img.addEventListener("mousemove", handleRemoteMouseMove);
+        img.addEventListener("mousemove", handleRemoteMouseMove, { passive: true });
         img.addEventListener("mousedown", handleRemoteMouseDown);
         img.addEventListener("mouseup", handleRemoteMouseUp);
-        img.addEventListener("contextmenu", (e) => e.preventDefault());
+        img.addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        });
         img.addEventListener("click", (e) => {
           e.preventDefault();
+          e.stopPropagation();
           img.focus(); // Focus image for keyboard events
           handleRemoteClick(e);
         });
         
+        // Also handle mouse events on the container for better coverage
+        screensEl.addEventListener("mousemove", (e) => {
+          if (e.target === img || img.contains(e.target)) {
+            handleRemoteMouseMove(e);
+          }
+        }, { passive: true });
+        
         screensEl.innerHTML = "";
         screensEl.appendChild(img);
+        
+        // Focus the image to enable keyboard events
+        setTimeout(() => {
+          img.focus();
+        }, 100);
       }
     }
 
